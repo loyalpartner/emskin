@@ -33,6 +33,12 @@ Computed once from compositor-reported surface height.")
 (defvar-local eaf-eafvil--window-id nil
   "eafvil window_id for the EAF app embedded in this buffer.")
 
+(defvar-local eaf-eafvil--visible nil
+  "Whether this EAF buffer is currently displayed in an Emacs window.")
+
+(defvar eaf-eafvil--displayed-table (make-hash-table :test 'eql)
+  "Reusable hash-table for `eaf-eafvil--sync-all' to avoid per-call allocation.")
+
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
 ;; ---------------------------------------------------------------------------
@@ -127,7 +133,7 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
                  (gethash "width" msg) h offset)
         ;; Re-sync all EAF windows now that we have the correct offset.
         (dolist (frame (frame-list))
-          (eaf-eafvil--sync-all-geometries frame))))
+          (eaf-eafvil--sync-all frame))))
      (t
       (message "eafvil: unknown message type %s" type)))))
 
@@ -138,7 +144,8 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
     (with-current-buffer buf
       (setq-local eaf-eafvil--window-id window-id)
       (setq-local mode-name "EAF")
-      (setq-local buffer-read-only t))
+      (setq-local buffer-read-only t)
+      (add-hook 'kill-buffer-hook #'eaf-eafvil--kill-buffer-hook nil t))
     (switch-to-buffer buf)
     (when-let ((win (get-buffer-window buf t)))
       (eaf-eafvil--report-geometry window-id win))
@@ -153,6 +160,10 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
 (defun eaf-eafvil--on-window-destroyed (window-id)
   "Kill the EAF buffer associated with WINDOW-ID."
   (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+    ;; Clear window-id first to prevent kill-buffer-hook from sending
+    ;; a redundant "close" message back to the compositor.
+    (with-current-buffer buf
+      (setq-local eaf-eafvil--window-id nil))
     (kill-buffer buf)
     (message "eafvil: window %s destroyed" window-id)))
 
@@ -161,6 +172,16 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
   (when-let ((buf (eaf-eafvil--find-buffer window-id)))
     (with-current-buffer buf
       (rename-buffer (format "*eaf: %s*" title) t))))
+
+;; ---------------------------------------------------------------------------
+;; Lifecycle: kill-buffer → close
+;; ---------------------------------------------------------------------------
+
+(defun eaf-eafvil--kill-buffer-hook ()
+  "Notify eafvil to close the app when its Emacs buffer is killed."
+  (when eaf-eafvil--window-id
+    (eaf-eafvil--send `((type . "close")
+                        (window_id . ,eaf-eafvil--window-id)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -262,14 +283,36 @@ Covers the full window width (including fringes) but excludes the mode-line."
                       (w . ,(nth 2 geo))
                       (h . ,(nth 3 geo)))))))
 
-(defun eaf-eafvil--sync-all-geometries (frame)
-  "Sync geometry for every EAF buffer visible in FRAME."
-  (dolist (win (window-list frame nil nil))
-    (let ((window-id (buffer-local-value 'eaf-eafvil--window-id (window-buffer win))))
-      (when window-id
-        (eaf-eafvil--report-geometry window-id win)))))
+(defun eaf-eafvil--sync-all (_frame)
+  "Sync visibility and geometry for all EAF buffers across all frames."
+  (let ((displayed eaf-eafvil--displayed-table))
+    (clrhash displayed)
+    ;; Pass 1: collect currently displayed EAF window-ids.
+    (dolist (fr (frame-list))
+      (dolist (win (window-list fr 'no-minibuf))
+        (when-let ((wid (buffer-local-value 'eaf-eafvil--window-id
+                                            (window-buffer win))))
+          (unless (gethash wid displayed)
+            (puthash wid win displayed)))))
+    ;; Pass 2: update visibility and geometry for every EAF buffer.
+    (dolist (buf (buffer-list))
+      (when-let ((wid (buffer-local-value 'eaf-eafvil--window-id buf)))
+        (let* ((win (gethash wid displayed))
+               (now-visible (and win t))
+               (was-visible (buffer-local-value 'eaf-eafvil--visible buf)))
+          ;; Send set_visibility only when state changed.
+          (unless (eq now-visible was-visible)
+            (with-current-buffer buf
+              (setq-local eaf-eafvil--visible now-visible))
+            (eaf-eafvil--send `((type . "set_visibility")
+                                (window_id . ,wid)
+                                (visible . ,(if now-visible t :false)))))
+          ;; Sync geometry for visible windows.
+          (when win
+            (eaf-eafvil--report-geometry wid win)))))))
 
-(add-hook 'window-size-change-functions #'eaf-eafvil--sync-all-geometries)
+(add-hook 'window-size-change-functions #'eaf-eafvil--sync-all)
+(add-hook 'window-buffer-change-functions #'eaf-eafvil--sync-all)
 
 ;; ---------------------------------------------------------------------------
 ;; Launch an EAF application
