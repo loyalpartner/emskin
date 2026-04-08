@@ -189,10 +189,7 @@ fn handle_ipc_message(state: &mut EafvilState, msg: ipc::IncomingMessage) {
             state: key_state,
             modifiers,
         } => {
-            tracing::debug!(
-                "IPC forward_key window={window_id} key={keycode} state={key_state} mods={modifiers}"
-            );
-            // TODO: inject wl_keyboard.key into target surface.
+            ipc_forward_key(state, window_id, keycode, key_state, modifiers);
         }
     }
 }
@@ -251,6 +248,63 @@ fn ipc_set_visibility(state: &mut EafvilState, window_id: u64, visible: bool) {
     } else if let Some(geo) = geo {
         state.space.map_element(win, geo.loc, false);
     }
+}
+
+fn ipc_forward_key(
+    state: &mut EafvilState,
+    window_id: u64,
+    keycode: u32,
+    key_state: u32,
+    // TODO: modifiers parameter is currently ignored; the injected key event
+    // uses whatever modifier state is already active on the keyboard.
+    // For correct Shift+Tab etc., apply via keyboard.set_modifiers() first.
+    _modifiers: u32,
+) {
+    tracing::debug!("IPC forward_key window={window_id} key={keycode} state={key_state}");
+
+    // Clone the target surface to release the borrow on state.apps.
+    let target = state
+        .apps
+        .get(window_id)
+        .and_then(|app| app.window.toplevel().map(|t| t.wl_surface().clone()));
+    let Some(target) = target else {
+        tracing::warn!("forward_key: unknown window_id={window_id}");
+        return;
+    };
+
+    // Validate key_state before touching focus to avoid leaking focus state.
+    let press_state = match key_state {
+        1 => smithay::backend::input::KeyState::Pressed,
+        0 => smithay::backend::input::KeyState::Released,
+        other => {
+            tracing::warn!("forward_key: invalid key_state={other}, ignoring");
+            return;
+        }
+    };
+
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        tracing::warn!("forward_key: keyboard not available");
+        return;
+    };
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    let time = (state.start_time.elapsed().as_millis() & 0xFFFF_FFFF) as u32;
+
+    // Temporarily switch focus to the EAF app, inject the key, then restore.
+    let saved_focus = keyboard.current_focus();
+    keyboard.set_focus(state, Some(target), serial);
+
+    keyboard.input::<(), _>(
+        state,
+        keycode.into(),
+        press_state,
+        serial,
+        time,
+        |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+    );
+
+    // Restore keyboard focus.
+    let restore_serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    keyboard.set_focus(state, saved_focus, restore_serial);
 }
 
 fn init_logging() {

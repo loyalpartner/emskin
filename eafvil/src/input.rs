@@ -22,6 +22,18 @@ impl EafvilState {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 
+                // When focus is on an EAF app and Ctrl/Alt is held,
+                // redirect focus to Emacs so Emacs keybindings (C-x, M-x, etc.) work.
+                let mods = keyboard.modifier_state();
+                if mods.ctrl || mods.alt {
+                    if let Some(emacs) = self.emacs_surface.clone() {
+                        if keyboard.current_focus().as_ref() != Some(&emacs) {
+                            let focus_serial = SERIAL_COUNTER.next_serial();
+                            keyboard.set_focus(self, Some(emacs), focus_serial);
+                        }
+                    }
+                }
+
                 keyboard.input::<(), _>(
                     self,
                     event.key_code(),
@@ -73,11 +85,12 @@ impl EafvilState {
                 let button = event.button_code();
                 let button_state = event.state();
 
-                // Clone to release shared borrow on self before set_focus(&mut self).
+                // Focus the surface under the pointer — EAF app or Emacs.
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
-                    if let Some(emacs_surface) = self.emacs_surface.clone() {
-                        keyboard.set_focus(self, Some(emacs_surface), serial);
-                    }
+                    let pos = pointer.current_location();
+                    let clicked = self.surface_under(pos).map(|(s, _)| s);
+                    let focus = clicked.or_else(|| self.emacs_surface.clone());
+                    keyboard.set_focus(self, focus, serial);
                 }
 
                 pointer.button(

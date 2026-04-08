@@ -43,6 +43,10 @@ impl AppManager {
         self.windows.remove(&window_id)
     }
 
+    pub fn get(&self, window_id: u64) -> Option<&AppWindow> {
+        self.windows.get(&window_id)
+    }
+
     pub fn get_mut(&mut self, window_id: u64) -> Option<&mut AppWindow> {
         self.windows.get_mut(&window_id)
     }
