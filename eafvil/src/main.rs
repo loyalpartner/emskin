@@ -204,6 +204,12 @@ fn spawn_child(command: &str, args: &[String], x_display: u32, state: &mut Eafvi
         .args(args)
         .env("WAYLAND_DISPLAY", socket_name)
         .env("DISPLAY", format!(":{x_display}"))
+        // Ensure child apps prefer Wayland even when host is X11.
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env("GDK_BACKEND", "wayland,x11")
+        .env("QT_QPA_PLATFORM", "wayland;xcb")
+        .env("SDL_VIDEODRIVER", "wayland")
+        .env("CLUTTER_BACKEND", "wayland")
         .spawn()
     {
         Ok(child) => state.emacs_child = Some(child),
