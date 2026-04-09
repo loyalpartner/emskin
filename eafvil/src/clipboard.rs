@@ -87,6 +87,14 @@ impl HostClipboard {
             Self::X11(p) => p.clear_host_selection(target),
         }
     }
+
+    /// Complete an outgoing transfer (pipe data fully read by calloop).
+    pub fn complete_outgoing(&mut self, id: u64, data: Vec<u8>) {
+        match self {
+            Self::X11(p) => p.complete_outgoing(id, data),
+            Self::Wayland(_) => {}
+        }
+    }
 }
 
 /// Events from host clipboard that need processing by the compositor.
@@ -97,10 +105,14 @@ pub enum ClipboardEvent {
         mime_types: Vec<String>,
     },
     /// Host requests data from our selection (external paste of internal copy).
+    /// `write_fd` goes to smithay (client writes data here).
+    /// `read_fd` is `Some` for X11 path (register with calloop), `None` for Wayland.
     HostSendRequest {
+        id: u64,
         target: SelectionTarget,
         mime_type: String,
-        fd: OwnedFd,
+        write_fd: OwnedFd,
+        read_fd: Option<OwnedFd>,
     },
     /// Our source on the host was cancelled (replaced by another app).
     SourceCancelled { target: SelectionTarget },
@@ -360,9 +372,11 @@ impl ClipboardState {
             SourceRole::Primary => SelectionTarget::Primary,
         };
         self.events.push(ClipboardEvent::HostSendRequest {
+            id: 0,
             target,
             mime_type,
-            fd,
+            write_fd: fd,
+            read_fd: None,
         });
     }
 

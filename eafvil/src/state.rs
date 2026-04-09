@@ -4,7 +4,9 @@ use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
-        calloop::{generic::Generic, EventLoop, Interest, LoopSignal, Mode, PostAction},
+        calloop::{
+            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+        },
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
@@ -37,6 +39,7 @@ pub struct EafvilState {
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
+    pub loop_handle: LoopHandle<'static, EafvilState>,
 
     // Smithay State
     pub compositor_state: CompositorState,
@@ -94,6 +97,7 @@ pub struct EafvilState {
 impl EafvilState {
     pub fn new(
         event_loop: &mut EventLoop<Self>,
+        loop_handle: LoopHandle<'static, Self>,
         display: Display<Self>,
         ipc: crate::ipc::IpcServer,
         xkb_config: smithay::input::keyboard::XkbConfig<'_>,
@@ -138,6 +142,7 @@ impl EafvilState {
 
             space,
             loop_signal,
+            loop_handle,
             socket_name,
 
             compositor_state,

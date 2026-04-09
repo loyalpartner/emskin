@@ -44,11 +44,7 @@ impl CompositorHandler for EafvilState {
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| {
-                    w.wl_surface()
-                        .map(|s| *s == root)
-                        .unwrap_or(false)
-                })
+                .find(|w| w.wl_surface().map(|s| *s == root).unwrap_or(false))
             {
                 window.on_commit();
             }

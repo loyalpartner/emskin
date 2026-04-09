@@ -47,11 +47,7 @@ x11rb::atom_manager! {
 // MIME <-> Atom helpers
 // ---------------------------------------------------------------------------
 
-fn mime_from_atom(
-    atom: Atom,
-    conn: &RustConnection,
-    atoms: &ClipboardAtoms,
-) -> Option<String> {
+fn mime_from_atom(atom: Atom, conn: &RustConnection, atoms: &ClipboardAtoms) -> Option<String> {
     match atom {
         a if a == atoms.TEXT => Some("text/plain".into()),
         a if a == atoms.UTF8_STRING => Some("text/plain;charset=utf-8".into()),
@@ -64,11 +60,7 @@ fn mime_from_atom(
     }
 }
 
-fn atom_from_mime(
-    mime: &str,
-    conn: &RustConnection,
-    atoms: &ClipboardAtoms,
-) -> Option<Atom> {
+fn atom_from_mime(mime: &str, conn: &RustConnection, atoms: &ClipboardAtoms) -> Option<Atom> {
     match mime {
         "text/plain" => Some(atoms.TEXT),
         "text/plain;charset=utf-8" => Some(atoms.UTF8_STRING),
@@ -95,10 +87,7 @@ fn property_atom(target: SelectionTarget, atoms: &ClipboardAtoms) -> Atom {
     }
 }
 
-fn selection_target_from_atom(
-    atom: Atom,
-    atoms: &ClipboardAtoms,
-) -> Option<SelectionTarget> {
+fn selection_target_from_atom(atom: Atom, atoms: &ClipboardAtoms) -> Option<SelectionTarget> {
     if atom == atoms.CLIPBOARD {
         Some(SelectionTarget::Clipboard)
     } else if atom == atoms.PRIMARY {
@@ -124,17 +113,11 @@ enum PendingConvert {
     },
 }
 
-/// Outgoing transfer: responding to a host SelectionRequest with internal data.
-struct PendingOutgoing {
+/// Active INCR outgoing transfer (only exists after pipe data is fully read).
+struct IncrOutgoing {
     request: SelectionRequestEvent,
-    read_fd: OwnedFd,
     data: Vec<u8>,
-    done_reading: bool,
-    // INCR state
-    incr: bool,
-    property_set: bool,
     flush_on_delete: bool,
-    notified: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +140,12 @@ pub struct X11ClipboardProxy {
     // Pending ConvertSelection responses keyed by (selection, property).
     pending_converts: HashMap<(Atom, Atom), PendingConvert>,
 
-    // Outgoing transfers (host app pasting our data).
-    pending_outgoing: Vec<PendingOutgoing>,
+    // Outgoing transfer state.
+    next_outgoing_id: u64,
+    /// X11 requests waiting for pipe data (calloop reads the pipe).
+    outgoing_requests: HashMap<u64, SelectionRequestEvent>,
+    /// Active INCR transfers (pipe data already received, sending chunks).
+    incr_outgoing: Vec<IncrOutgoing>,
 
     events: Vec<ClipboardEvent>,
     suppress_clipboard: u32,
@@ -208,7 +195,11 @@ impl X11ClipboardProxy {
             depth,
             window,
             root,
-            0, 0, 10, 10, 0,
+            0,
+            0,
+            10,
+            10,
+            0,
             WindowClass::INPUT_OUTPUT,
             visual,
             &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
@@ -251,7 +242,9 @@ impl X11ClipboardProxy {
             our_clipboard_ts: x11rb::CURRENT_TIME,
             our_primary_ts: x11rb::CURRENT_TIME,
             pending_converts: HashMap::new(),
-            pending_outgoing: Vec::new(),
+            next_outgoing_id: 0,
+            outgoing_requests: HashMap::new(),
+            incr_outgoing: Vec::new(),
             events: Vec::new(),
             suppress_clipboard: 0,
             suppress_primary: 0,
@@ -265,7 +258,6 @@ impl X11ClipboardProxy {
 
     /// Read pending events from the X11 connection (non-blocking).
     pub fn dispatch(&mut self) {
-        // Process all available X11 events.
         loop {
             match self.conn.poll_for_event() {
                 Ok(Some(event)) => self.handle_event(event),
@@ -276,9 +268,6 @@ impl X11ClipboardProxy {
                 }
             }
         }
-
-        // Process pending outgoing transfers (poll pipe fds).
-        self.process_outgoing();
     }
 
     /// Drain queued clipboard events for the compositor.
@@ -291,6 +280,7 @@ impl X11ClipboardProxy {
     /// Initiates a ConvertSelection request. The data is forwarded
     /// asynchronously via subsequent dispatch() calls.
     pub fn receive_from_host(&mut self, target: SelectionTarget, mime_type: &str, fd: OwnedFd) {
+        tracing::trace!("receive_from_host: {target:?} mime={mime_type}");
         let sel = selection_atom(target, &self.atoms);
         let prop = property_atom(target, &self.atoms);
 
@@ -299,13 +289,10 @@ impl X11ClipboardProxy {
             return;
         };
 
-        if let Err(e) = self.conn.convert_selection(
-            self.window,
-            sel,
-            target_atom,
-            prop,
-            x11rb::CURRENT_TIME,
-        ) {
+        if let Err(e) =
+            self.conn
+                .convert_selection(self.window, sel, target_atom, prop, x11rb::CURRENT_TIME)
+        {
             tracing::warn!("ConvertSelection failed: {e}");
             return;
         }
@@ -325,7 +312,10 @@ impl X11ClipboardProxy {
     pub fn set_host_selection(&mut self, target: SelectionTarget, mime_types: &[String]) {
         let sel = selection_atom(target, &self.atoms);
 
-        if let Err(e) = self.conn.set_selection_owner(self.window, sel, x11rb::CURRENT_TIME) {
+        if let Err(e) = self
+            .conn
+            .set_selection_owner(self.window, sel, x11rb::CURRENT_TIME)
+        {
             tracing::warn!("set_selection_owner failed: {e}");
             return;
         }
@@ -347,7 +337,10 @@ impl X11ClipboardProxy {
     pub fn clear_host_selection(&mut self, target: SelectionTarget) {
         let sel = selection_atom(target, &self.atoms);
 
-        if let Err(e) = self.conn.set_selection_owner(0u32, sel, x11rb::CURRENT_TIME) {
+        if let Err(e) = self
+            .conn
+            .set_selection_owner(0u32, sel, x11rb::CURRENT_TIME)
+        {
             tracing::warn!("clear_selection_owner failed: {e}");
             return;
         }
@@ -381,6 +374,7 @@ impl X11ClipboardProxy {
 
     /// Host selection owner changed (XFixes notification).
     fn on_xfixes_notify(&mut self, n: xfixes::SelectionNotifyEvent) {
+        tracing::trace!("XFixes: selection owner changed (owner={})", n.owner);
         let Some(target) = selection_target_from_atom(n.selection, &self.atoms) else {
             return;
         };
@@ -440,10 +434,17 @@ impl X11ClipboardProxy {
 
     /// Response to our ConvertSelection request.
     fn on_selection_notify(&mut self, n: SelectionNotifyEvent) {
+        tracing::trace!(
+            "SelectionNotify: selection={} property={} target={}",
+            n.selection,
+            n.property,
+            n.target
+        );
         let key = (n.selection, n.property);
 
         // property == NONE means conversion failed.
         if n.property == x11rb::NONE {
+            tracing::trace!("SelectionNotify: conversion failed (property=NONE)");
             if let Some(PendingConvert::Targets { selection_target }) =
                 self.pending_converts.remove(&key)
             {
@@ -475,7 +476,7 @@ impl X11ClipboardProxy {
             true, // delete after reading
             self.window,
             property,
-            AtomEnum::ATOM,
+            AtomEnum::ANY,
             0,
             1024,
         ) {
@@ -492,6 +493,13 @@ impl X11ClipboardProxy {
             }
         };
 
+        tracing::trace!(
+            "TARGETS reply: type={} format={} len={}",
+            reply.type_,
+            reply.format,
+            reply.value_len
+        );
+
         let mime_types: Vec<String> = reply
             .value32()
             .map(|atoms| {
@@ -502,10 +510,8 @@ impl X11ClipboardProxy {
             .unwrap_or_default();
 
         tracing::debug!("Host {target:?} changed ({} types)", mime_types.len());
-        self.events.push(ClipboardEvent::HostSelectionChanged {
-            target,
-            mime_types,
-        });
+        self.events
+            .push(ClipboardEvent::HostSelectionChanged { target, mime_types });
     }
 
     /// Read data property and write to the internal client fd.
@@ -555,11 +561,18 @@ impl X11ClipboardProxy {
 
         // Non-INCR: data is in the reply.
         data.extend_from_slice(&reply.value);
+        tracing::trace!("receive_from_host: got {} bytes, writing to fd", data.len());
         Self::write_all_to_fd(&fd, &data);
     }
 
     /// Handle PropertyNotify for INCR transfers (both incoming and outgoing).
     fn on_property_notify(&mut self, n: PropertyNotifyEvent) {
+        tracing::trace!(
+            "PropertyNotify: window={} atom={} state={:?}",
+            n.window,
+            n.atom,
+            n.state
+        );
         if n.window == self.window && n.state == Property::NEW_VALUE {
             // Incoming INCR chunk: property was set by the selection owner.
             self.handle_incr_chunk(n.atom);
@@ -573,39 +586,39 @@ impl X11ClipboardProxy {
 
     /// Read an INCR chunk from our window's property.
     fn handle_incr_chunk(&mut self, property: Atom) {
-        // Find the pending INCR receive that uses this property.
+        // Only process properties that belong to active INCR data transfers.
+        // Skip Targets entries — those are handled by on_selection_notify.
         let key = self
             .pending_converts
-            .keys()
-            .find(|(_, p)| *p == property)
-            .copied();
+            .iter()
+            .find(|(&(_, p), v)| {
+                p == property && matches!(v, PendingConvert::Data { incr: true, .. })
+            })
+            .map(|(k, _)| *k);
 
         let Some(key) = key else {
             return;
         };
 
-        let reply = match self.conn.get_property(
-            true,
-            self.window,
-            property,
-            AtomEnum::ANY,
-            0,
-            0x1FFFFFFF,
-        ) {
-            Ok(cookie) => match cookie.reply() {
-                Ok(r) => r,
+        let reply =
+            match self
+                .conn
+                .get_property(true, self.window, property, AtomEnum::ANY, 0, 0x1FFFFFFF)
+            {
+                Ok(cookie) => match cookie.reply() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("INCR get_property failed: {e}");
+                        self.pending_converts.remove(&key);
+                        return;
+                    }
+                },
                 Err(e) => {
-                    tracing::warn!("INCR get_property failed: {e}");
+                    tracing::warn!("INCR get_property send failed: {e}");
                     self.pending_converts.remove(&key);
                     return;
                 }
-            },
-            Err(e) => {
-                tracing::warn!("INCR get_property send failed: {e}");
-                self.pending_converts.remove(&key);
-                return;
-            }
-        };
+            };
 
         if reply.value.is_empty() {
             // Zero-length chunk = INCR transfer complete.
@@ -622,8 +635,13 @@ impl X11ClipboardProxy {
 
     /// Handle SelectionRequest from a host application wanting our data.
     fn on_selection_request(&mut self, req: SelectionRequestEvent) {
+        tracing::trace!(
+            "SelectionRequest from window={} target_atom={}",
+            req.requestor,
+            req.target
+        );
         let Some(target) = selection_target_from_atom(req.selection, &self.atoms) else {
-            Self::send_selection_notify(&self.conn,&req, false);
+            Self::send_selection_notify(&self.conn, &req, false);
             return;
         };
 
@@ -633,14 +651,13 @@ impl X11ClipboardProxy {
         };
 
         if our_mimes.is_empty() {
-            Self::send_selection_notify(&self.conn,&req, false);
+            Self::send_selection_notify(&self.conn, &req, false);
             return;
         }
 
         // TARGETS request.
         if req.target == self.atoms.TARGETS {
-            let mut target_atoms: Vec<Atom> =
-                vec![self.atoms.TARGETS, self.atoms.TIMESTAMP];
+            let mut target_atoms: Vec<Atom> = vec![self.atoms.TARGETS, self.atoms.TIMESTAMP];
             for mime in our_mimes {
                 if let Some(a) = atom_from_mime(mime, &self.conn, &self.atoms) {
                     target_atoms.push(a);
@@ -653,7 +670,7 @@ impl X11ClipboardProxy {
                 AtomEnum::ATOM,
                 &target_atoms,
             );
-            Self::send_selection_notify(&self.conn,&req, true);
+            Self::send_selection_notify(&self.conn, &req, true);
             return;
         }
 
@@ -670,140 +687,96 @@ impl X11ClipboardProxy {
                 AtomEnum::INTEGER,
                 &[ts],
             );
-            Self::send_selection_notify(&self.conn,&req, true);
+            Self::send_selection_notify(&self.conn, &req, true);
             return;
         }
 
         // Data request: create a pipe and emit HostSendRequest.
         let Some(mime_type) = mime_from_atom(req.target, &self.conn, &self.atoms) else {
             tracing::debug!("SelectionRequest: unknown target atom {}", req.target);
-            Self::send_selection_notify(&self.conn,&req, false);
+            Self::send_selection_notify(&self.conn, &req, false);
             return;
         };
 
         let (read_fd, write_fd) = match Self::make_pipe() {
             Some(p) => p,
             None => {
-                Self::send_selection_notify(&self.conn,&req, false);
+                Self::send_selection_notify(&self.conn, &req, false);
                 return;
             }
         };
 
+        let id = self.next_outgoing_id;
+        self.next_outgoing_id += 1;
+        self.outgoing_requests.insert(id, req);
+
         self.events.push(ClipboardEvent::HostSendRequest {
+            id,
             target,
             mime_type,
-            fd: write_fd,
-        });
-
-        self.pending_outgoing.push(PendingOutgoing {
-            request: req,
-            read_fd,
-            data: Vec::new(),
-            done_reading: false,
-            incr: false,
-            property_set: false,
-            flush_on_delete: false,
-            notified: false,
+            write_fd,
+            read_fd: Some(read_fd),
         });
     }
 
-    /// Poll pending outgoing transfers for data availability.
-    fn process_outgoing(&mut self) {
-        let mut i = 0;
-        while i < self.pending_outgoing.len() {
-            let done =
-                Self::process_one_outgoing_transfer(&self.conn, &self.atoms, &mut self.pending_outgoing[i]);
-            if done {
-                self.pending_outgoing.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
-    }
+    /// Complete an outgoing transfer after calloop has read all pipe data.
+    pub fn complete_outgoing(&mut self, id: u64, data: Vec<u8>) {
+        let Some(req) = self.outgoing_requests.remove(&id) else {
+            return;
+        };
 
-    /// Process a single outgoing transfer. Returns true if transfer is complete.
-    fn process_one_outgoing_transfer(
-        conn: &RustConnection,
-        atoms: &ClipboardAtoms,
-        transfer: &mut PendingOutgoing,
-    ) -> bool {
-        if transfer.done_reading && !transfer.incr && transfer.notified {
-            return true;
-        }
+        tracing::debug!("Outgoing transfer complete: {} bytes", data.len());
 
-        if !transfer.done_reading {
-            let mut buf = [0u8; INCR_CHUNK_SIZE];
-            let fd_raw = transfer.read_fd.as_raw_fd();
-            let n = unsafe { libc::read(fd_raw, buf.as_mut_ptr().cast(), buf.len()) };
-            if n > 0 {
-                transfer.data.extend_from_slice(&buf[..n as usize]);
-            } else if n == 0 {
-                transfer.done_reading = true;
-            } else {
-                let err = std::io::Error::last_os_error();
-                if err.kind() != std::io::ErrorKind::WouldBlock {
-                    tracing::warn!("outgoing pipe read error: {err}");
-                    Self::send_selection_notify(conn, &transfer.request, false);
-                    return true;
-                }
-                return false;
-            }
-        }
-
-        if transfer.done_reading && !transfer.notified {
-            if transfer.data.len() > INCR_CHUNK_SIZE {
-                transfer.incr = true;
-                let size = transfer.data.len() as u32;
-                let _ = conn.change_property32(
-                    PropMode::REPLACE,
-                    transfer.request.requestor,
-                    transfer.request.property,
-                    atoms.INCR,
-                    &[size],
-                );
-                Self::send_selection_notify(conn, &transfer.request, true);
-                transfer.notified = true;
-                let _ = conn.flush();
-                return false;
-            }
-            let _ = conn.change_property8(
+        if data.len() > INCR_CHUNK_SIZE {
+            // Start INCR transfer for large data.
+            let size = data.len() as u32;
+            let _ = self.conn.change_property32(
                 PropMode::REPLACE,
-                transfer.request.requestor,
-                transfer.request.property,
-                transfer.request.target,
-                &transfer.data,
+                req.requestor,
+                req.property,
+                self.atoms.INCR,
+                &[size],
             );
-            Self::send_selection_notify(conn, &transfer.request, true);
-            transfer.notified = true;
-            let _ = conn.flush();
-            return true;
+            Self::send_selection_notify(&self.conn, &req, true);
+            let _ = self.conn.flush();
+
+            self.incr_outgoing.push(IncrOutgoing {
+                request: req,
+                data,
+                flush_on_delete: false,
+            });
+            return;
         }
 
-        false
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            req.requestor,
+            req.property,
+            req.target,
+            &data,
+        );
+        Self::send_selection_notify(&self.conn, &req, true);
+        let _ = self.conn.flush();
     }
 
     /// Handle PropertyNotify(DELETE) for outgoing INCR transfers.
     fn handle_outgoing_property_delete(&mut self, window: Window, property: Atom) {
-        let Some(transfer) = self
-            .pending_outgoing
-            .iter_mut()
-            .find(|t| t.request.requestor == window && t.request.property == property && t.incr)
+        let Some(idx) = self
+            .incr_outgoing
+            .iter()
+            .position(|t| t.request.requestor == window && t.request.property == property)
         else {
             return;
         };
 
-        transfer.property_set = false;
+        let transfer = &mut self.incr_outgoing[idx];
 
         if transfer.flush_on_delete {
-            // Final empty chunk was deleted — transfer complete.
-            // Will be cleaned up by process_outgoing.
-            transfer.done_reading = true;
-            transfer.notified = true;
+            self.incr_outgoing.swap_remove(idx);
             return;
         }
 
-        if transfer.data.is_empty() && transfer.done_reading {
-            // Send final empty chunk.
+        if transfer.data.is_empty() {
             let _ = self.conn.change_property8(
                 PropMode::REPLACE,
                 window,
@@ -816,17 +789,15 @@ impl X11ClipboardProxy {
             return;
         }
 
-        // Send next chunk.
         let chunk_end = transfer.data.len().min(INCR_CHUNK_SIZE);
-        let chunk: Vec<u8> = transfer.data.drain(..chunk_end).collect();
         let _ = self.conn.change_property8(
             PropMode::REPLACE,
             window,
             property,
             transfer.request.target,
-            &chunk,
+            &transfer.data[..chunk_end],
         );
-        transfer.property_set = true;
+        transfer.data.drain(..chunk_end);
         let _ = self.conn.flush();
     }
 
@@ -834,11 +805,7 @@ impl X11ClipboardProxy {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn send_selection_notify(
-        conn: &RustConnection,
-        req: &SelectionRequestEvent,
-        success: bool,
-    ) {
+    fn send_selection_notify(conn: &RustConnection, req: &SelectionRequestEvent, success: bool) {
         let property = if success { req.property } else { x11rb::NONE };
         let event = SelectionNotifyEvent {
             response_type: SELECTION_NOTIFY_EVENT,
@@ -858,13 +825,8 @@ impl X11ClipboardProxy {
         let raw = fd.as_raw_fd();
         let mut offset = 0;
         while offset < data.len() {
-            let n = unsafe {
-                libc::write(
-                    raw,
-                    data[offset..].as_ptr().cast(),
-                    data.len() - offset,
-                )
-            };
+            let n =
+                unsafe { libc::write(raw, data[offset..].as_ptr().cast(), data.len() - offset) };
             if n <= 0 {
                 break;
             }
@@ -879,11 +841,6 @@ impl X11ClipboardProxy {
             tracing::warn!("pipe2 failed: {}", std::io::Error::last_os_error());
             return None;
         }
-        unsafe {
-            Some((
-                OwnedFd::from_raw_fd(fds[0]),
-                OwnedFd::from_raw_fd(fds[1]),
-            ))
-        }
+        unsafe { Some((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
     }
 }
