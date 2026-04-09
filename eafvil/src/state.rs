@@ -199,7 +199,7 @@ impl EafvilState {
         // 1. Check mirror regions first — they overlay Emacs visually.
         //    Use app.geometry (always available) instead of space.element_geometry
         //    because the source window may be unmapped (visible=false).
-        if let Some((window_id, mapped_pos)) = self.apps.mirror_under(pos) {
+        if let Some((window_id, _view_id, mapped_pos)) = self.apps.mirror_under(pos) {
             if let Some(app) = self.apps.get(window_id) {
                 if let Some(geo) = app.geometry {
                     let local = mapped_pos - geo.loc.to_f64();

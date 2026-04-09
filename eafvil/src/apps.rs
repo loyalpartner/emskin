@@ -146,18 +146,18 @@ impl AppManager {
     }
 
     /// Check if `pos` falls inside any mirror of any app window.
-    /// Returns (window_id, mapped surface coordinate) with proportional mapping.
+    /// Returns (window_id, view_id, mapped surface coordinate) with proportional mapping.
     pub fn mirror_under(
         &self,
         pos: smithay::utils::Point<f64, Logical>,
-    ) -> Option<(u64, smithay::utils::Point<f64, Logical>)> {
+    ) -> Option<(u64, u64, smithay::utils::Point<f64, Logical>)> {
         for app in self.windows.values() {
             let Some(source_geo) = app.geometry else {
                 continue;
             };
             let src_size = source_geo.size.to_f64();
 
-            for mv in app.mirrors.values() {
+            for (&view_id, mv) in &app.mirrors {
                 let m = mv.geometry.to_f64();
                 let Some(ratio) = Self::aspect_fit_ratio(src_size, m.size) else {
                     continue;
@@ -172,7 +172,7 @@ impl AppManager {
                 }
 
                 let mapped = source_geo.loc.to_f64() + rel.downscale(ratio);
-                return Some((app.window_id, mapped));
+                return Some((app.window_id, view_id, mapped));
             }
         }
         None

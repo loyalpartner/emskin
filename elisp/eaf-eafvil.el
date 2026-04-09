@@ -135,6 +135,9 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
      ((string= type "title_changed")
       (eaf-eafvil--on-title-changed (gethash "window_id" msg)
                                  (gethash "title" msg "")))
+     ((string= type "focus_view")
+      (eaf-eafvil--on-focus-view (gethash "window_id" msg)
+                                 (gethash "view_id" msg)))
      ((string= type "surface_size")
       (let* ((h (gethash "height" msg))
              (offset (max 0 (- h (frame-pixel-height)))))
@@ -146,6 +149,21 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
           (eaf-eafvil--sync-all frame))))
      (t
       (message "eafvil: unknown message type %s" type)))))
+
+(defun eaf-eafvil--on-focus-view (window-id view-id)
+  "Select the Emacs window that corresponds to WINDOW-ID / VIEW-ID.
+VIEW-ID 0 means the source window; otherwise look up the mirror alist."
+  (let* ((state (gethash window-id eaf-eafvil--mirror-table))
+         (target (when state
+                   (if (= view-id 0)
+                       (car state)
+                     (cdr (assq view-id (cdr state)))))))
+    ;; Fallback for single-window case (no mirror-table entry).
+    (unless (and target (window-live-p target))
+      (when-let ((buf (eaf-eafvil--find-buffer window-id)))
+        (setq target (get-buffer-window buf t))))
+    (when (and target (window-live-p target))
+      (select-window target))))
 
 (defun eaf-eafvil--on-window-created (window-id title)
   "Create/display a buffer for the new EAF app and send initial geometry."

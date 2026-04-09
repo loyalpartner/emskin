@@ -1,7 +1,7 @@
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyboardKeyEvent, MouseButton, PointerAxisEvent, PointerButtonEvent,
     },
     input::{
         keyboard::FilterResult,
@@ -85,11 +85,28 @@ impl EafvilState {
                 let button = event.button_code();
                 let button_state = event.state();
 
-                // Focus the surface under the pointer — EAF app or Emacs.
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
                     let pos = pointer.current_location();
                     let clicked = self.surface_under(pos).map(|(s, _)| s);
                     let focus = clicked.or_else(|| self.emacs_surface.clone());
+
+                    // Left-click on an EAF app → tell Emacs to select that window.
+                    if event.button() == Some(MouseButton::Left) {
+                        if let Some((window_id, view_id, _)) = self.apps.mirror_under(pos) {
+                            self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
+                                window_id,
+                                view_id,
+                            });
+                        } else if let Some(window_id) =
+                            focus.as_ref().and_then(|s| self.apps.id_for_surface(s))
+                        {
+                            self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
+                                window_id,
+                                view_id: 0,
+                            });
+                        }
+                    }
+
                     keyboard.set_focus(self, focus, serial);
                 }
 
