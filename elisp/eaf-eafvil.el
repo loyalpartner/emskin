@@ -418,7 +418,7 @@ Covers the full window width (including fringes) but excludes the mode-line."
               (setq-local eaf-eafvil--visible now-visible))
             (eaf-eafvil--send `((type . "set_visibility")
                                 (window_id . ,wid)
-                                (visible . ,(if now-visible t :false)))))
+                                (visible . ,(if now-visible t :json-false)))))
           (if (not wins)
               ;; No windows showing this buffer — clean up mirrors.
               (progn
