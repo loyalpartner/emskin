@@ -11,7 +11,7 @@ eafvil 在一个 winit 窗口内运行独立的 Wayland 合成器，Emacs 作为
 - 主机剪贴板双向同步
 - Popup 支持（右键菜单、下拉框等）
 - xdg_activation_v1 焦点转移
-- 继承主机键盘布局
+- 通过 CLI 参数指定键盘布局（`--xkb-layout` 等）
 
 ## 依赖
 
