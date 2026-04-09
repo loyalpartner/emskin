@@ -391,6 +391,7 @@ fn ipc_add_mirror(
         crate::apps::MirrorView {
             geometry: geo,
             render_id: smithay::backend::renderer::element::Id::new(),
+            popup_render_ids: Vec::new(),
         },
     );
 }

@@ -7,7 +7,7 @@ use smithay::{
             element::texture::TextureRenderElement,
             gles::{GlesRenderer, GlesTexture},
             utils::with_renderer_surface_state,
-            Renderer,
+            Renderer, Texture,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -47,79 +47,109 @@ fn apply_pending_state(state: &mut EafvilState, backend: &mut WinitGraphicsBacke
     }
 }
 
-/// Build TextureRenderElements for all mirrors by reading the surface's
-/// committed texture directly — no copy, no snapshot.
+/// Build TextureRenderElements for all mirrors by reading each surface layer's
+/// (toplevel + popups) committed texture — no copy, no snapshot.
 fn build_mirror_elements(
-    state: &EafvilState,
+    state: &mut EafvilState,
     renderer: &mut GlesRenderer,
     scale: f64,
 ) -> Vec<TextureRenderElement<GlesTexture>> {
     let ctx = renderer.context_id();
     let mut elements = Vec::new();
-    for app in state.apps.windows() {
+    for app in state.apps.windows_mut() {
         if app.mirrors.is_empty() {
             continue;
         }
-        let Some(toplevel) = app.window.toplevel() else {
-            continue;
-        };
-        let wl_surface = toplevel.wl_surface().clone();
-        // Ensure the surface buffer is imported as a texture before reading it.
-        if let Err(e) =
-            smithay::backend::renderer::utils::import_surface_tree(renderer, &wl_surface)
-        {
-            tracing::warn!(
-                "import_surface_tree failed for wid={}: {e:?}",
-                app.window_id
-            );
-            continue;
-        }
-        let ctx_clone = ctx.clone();
-        let Some((texture, buf_scale, buf_transform, view_src)) =
-            with_renderer_surface_state(&wl_surface, |rss| {
-                let tex = rss.texture::<GlesTexture>(ctx_clone).cloned()?;
-                let src = rss.view().map(|v| v.src);
-                Some((tex, rss.buffer_scale(), rss.buffer_transform(), src))
-            })
-            .flatten()
-        else {
-            continue;
-        };
         let Some(source_geo) = app.geometry else {
             continue;
         };
         let src_size = source_geo.size.to_f64();
+        let layers = app.surface_layers();
 
-        for mv in app.mirrors.values() {
-            let m = mv.geometry;
-            let Some(ratio) = crate::apps::AppManager::aspect_fit_ratio(src_size, m.size.to_f64())
+        // Iterate layers in reverse: popups first (higher z-order in smithay's
+        // front-to-back damage tracker), then toplevel last (background).
+        for (layer_idx, layer) in layers.iter().enumerate().rev() {
+            if let Err(e) =
+                smithay::backend::renderer::utils::import_surface_tree(renderer, &layer.surface)
+            {
+                tracing::warn!(
+                    "import_surface_tree failed for wid={} layer={layer_idx}: {e:?}",
+                    app.window_id
+                );
+                continue;
+            }
+            let ctx_clone = ctx.clone();
+            let Some((texture, buf_scale, buf_transform, view_src)) =
+                with_renderer_surface_state(&layer.surface, |rss| {
+                    let tex = rss.texture::<GlesTexture>(ctx_clone).cloned()?;
+                    let src = rss.view().map(|v| v.src);
+                    Some((tex, rss.buffer_scale(), rss.buffer_transform(), src))
+                })
+                .flatten()
             else {
                 continue;
             };
-            let fit_w = (src_size.w * ratio).round() as i32;
-            let fit_h = (src_size.h * ratio).round() as i32;
 
-            let element = TextureRenderElement::from_static_texture(
-                mv.render_id.clone(),
-                ctx.clone(),
-                m.loc.to_f64().to_physical(scale),
-                texture.clone(),
-                buf_scale,
-                buf_transform,
-                None, // alpha
-                view_src,
-                Some((fit_w, fit_h).into()),
-                None, // opaque_regions
-                smithay::backend::renderer::element::Kind::Unspecified,
-            );
-            elements.push(element);
+            for mv in app.mirrors.values_mut() {
+                let m = mv.geometry;
+                let Some(ratio) =
+                    crate::apps::AppManager::aspect_fit_ratio(src_size, m.size.to_f64())
+                else {
+                    continue;
+                };
+
+                let layer_x = m.loc.x as f64 + layer.offset.x as f64 * ratio;
+                let layer_y = m.loc.y as f64 + layer.offset.y as f64 * ratio;
+
+                let (fit_w, fit_h) = if layer_idx == 0 {
+                    (
+                        (src_size.w * ratio).round() as i32,
+                        (src_size.h * ratio).round() as i32,
+                    )
+                } else {
+                    let tex_size = texture.size();
+                    (
+                        (tex_size.w as f64 * ratio / buf_scale as f64).round() as i32,
+                        (tex_size.h as f64 * ratio / buf_scale as f64).round() as i32,
+                    )
+                };
+
+                // Stable render ID: toplevel uses mv.render_id, popup layers
+                // use pre-allocated IDs from mv.popup_render_ids (grown on demand).
+                let render_id = if layer_idx == 0 {
+                    mv.render_id.clone()
+                } else {
+                    let popup_idx = layer_idx - 1;
+                    while mv.popup_render_ids.len() <= popup_idx {
+                        mv.popup_render_ids
+                            .push(smithay::backend::renderer::element::Id::new());
+                    }
+                    mv.popup_render_ids[popup_idx].clone()
+                };
+
+                let element = TextureRenderElement::from_static_texture(
+                    render_id,
+                    ctx.clone(),
+                    smithay::utils::Point::<f64, Logical>::from((layer_x, layer_y))
+                        .to_physical(scale),
+                    texture.clone(),
+                    buf_scale,
+                    buf_transform,
+                    None, // alpha
+                    view_src,
+                    Some((fit_w, fit_h).into()),
+                    None, // opaque_regions
+                    smithay::backend::renderer::element::Kind::Unspecified,
+                );
+                elements.push(element);
+            }
         }
     }
     elements
 }
 
 fn render_frame(
-    state: &EafvilState,
+    state: &mut EafvilState,
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     output: &Output,
     damage_tracker: &mut OutputDamageTracker,

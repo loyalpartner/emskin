@@ -4,9 +4,9 @@ use std::{
 };
 
 use smithay::{
-    desktop::Window,
+    desktop::{PopupManager, Window},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{IsAlive, Logical, Rectangle},
+    utils::{IsAlive, Logical, Point, Rectangle},
 };
 
 /// An embedded EAF application window.
@@ -29,6 +29,36 @@ pub struct AppWindow {
 pub struct MirrorView {
     pub geometry: Rectangle<i32, Logical>,
     pub render_id: smithay::backend::renderer::element::Id,
+    /// Stable render IDs for popup layers (index = popup layer index).
+    /// Grown on demand, never shrunk — avoids per-frame Id::new() allocation.
+    pub popup_render_ids: Vec<smithay::backend::renderer::element::Id>,
+}
+
+/// A renderable surface layer — toplevel or popup — with its offset relative to the toplevel origin.
+pub struct SurfaceLayer {
+    pub surface: WlSurface,
+    pub offset: Point<i32, Logical>,
+}
+
+impl AppWindow {
+    /// Collect the full surface stack: toplevel (offset=0,0) + all popups (recursive).
+    pub fn surface_layers(&self) -> Vec<SurfaceLayer> {
+        let Some(toplevel) = self.window.toplevel() else {
+            return Vec::new();
+        };
+        let wl = toplevel.wl_surface();
+        let mut layers = vec![SurfaceLayer {
+            surface: wl.clone(),
+            offset: (0, 0).into(),
+        }];
+        for (popup, offset) in PopupManager::popups_for_surface(wl) {
+            layers.push(SurfaceLayer {
+                surface: popup.wl_surface().clone(),
+                offset,
+            });
+        }
+        layers
+    }
 }
 
 /// Tracks all live EAF application windows.
@@ -62,6 +92,10 @@ impl AppManager {
 
     pub fn windows(&self) -> impl Iterator<Item = &AppWindow> {
         self.windows.values()
+    }
+
+    pub fn windows_mut(&mut self) -> impl Iterator<Item = &mut AppWindow> {
+        self.windows.values_mut()
     }
 
     /// Find the window_id for a given Wayland surface.

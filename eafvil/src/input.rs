@@ -22,6 +22,18 @@ impl EafvilState {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
 
+                // When focus is on an EAF app and Ctrl/Alt is held,
+                // redirect focus to Emacs so Emacs keybindings (C-x, M-x, etc.) work.
+                let mods = keyboard.modifier_state();
+                if mods.ctrl || mods.alt {
+                    if let Some(emacs) = self.emacs_surface.clone() {
+                        if keyboard.current_focus().as_ref() != Some(&emacs) {
+                            let focus_serial = SERIAL_COUNTER.next_serial();
+                            keyboard.set_focus(self, Some(emacs), focus_serial);
+                        }
+                    }
+                }
+
                 keyboard.input::<(), _>(
                     self,
                     event.key_code(),
