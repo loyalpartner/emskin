@@ -40,6 +40,8 @@ x11rb::atom_manager! {
         TEXT,
         _EAFVIL_CLIP_SEL,
         _EAFVIL_PRIM_SEL,
+        _EAFVIL_CLIP_INIT,
+        _EAFVIL_PRIM_INIT,
     }
 }
 
@@ -232,6 +234,40 @@ impl X11ClipboardProxy {
             return None;
         }
 
+        // Query initial clipboard state using separate property atoms
+        // so responses don't collide with later XFixes-triggered queries.
+        let mut pending_converts = HashMap::new();
+        for (sel, target, init_prop) in [
+            (atoms.CLIPBOARD, SelectionTarget::Clipboard, atoms._EAFVIL_CLIP_INIT),
+            (atoms.PRIMARY, SelectionTarget::Primary, atoms._EAFVIL_PRIM_INIT),
+        ] {
+            let owner = conn
+                .get_selection_owner(sel)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|r| r.owner)
+                .unwrap_or(0);
+            if owner != 0 && owner != window {
+                if let Err(e) = conn.convert_selection(
+                    window,
+                    sel,
+                    atoms.TARGETS,
+                    init_prop,
+                    x11rb::CURRENT_TIME,
+                ) {
+                    tracing::warn!("Initial ConvertSelection(TARGETS) failed: {e}");
+                    continue;
+                }
+                pending_converts.insert(
+                    (sel, init_prop),
+                    PendingConvert::Targets {
+                        selection_target: target,
+                    },
+                );
+            }
+        }
+        let _ = conn.flush();
+
         tracing::info!("X11 clipboard sync initialized");
         Some(Self {
             conn,
@@ -241,7 +277,7 @@ impl X11ClipboardProxy {
             our_primary_mimes: Vec::new(),
             our_clipboard_ts: x11rb::CURRENT_TIME,
             our_primary_ts: x11rb::CURRENT_TIME,
-            pending_converts: HashMap::new(),
+            pending_converts,
             next_outgoing_id: 0,
             outgoing_requests: HashMap::new(),
             incr_outgoing: Vec::new(),

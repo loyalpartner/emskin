@@ -92,6 +92,11 @@ pub struct EafvilState {
 
     /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
     pub clipboard: Option<crate::clipboard::HostClipboard>,
+
+    /// First internal selection per target already seen (and skipped).
+    /// Emacs/GTK sets clipboard on startup; we skip that to avoid overriding the host.
+    pub clipboard_init_done: bool,
+    pub primary_init_done: bool,
 }
 
 impl EafvilState {
@@ -172,6 +177,8 @@ impl EafvilState {
             emacs_app_id: None,
             pending_command: None,
             clipboard: None,
+            clipboard_init_done: false,
+            primary_init_done: false,
         })
     }
 
