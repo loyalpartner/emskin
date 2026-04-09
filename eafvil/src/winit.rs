@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use smithay::{
     backend::{
+        input::KeyState,
         renderer::{
             damage::OutputDamageTracker,
             element::texture::TextureRenderElement,
@@ -11,9 +12,10 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
+    input::keyboard::FilterResult,
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::calloop::EventLoop,
-    utils::{Logical, Physical, Rectangle, Size, Transform},
+    utils::{Logical, Physical, Rectangle, Size, Transform, SERIAL_COUNTER},
 };
 
 use crate::EafvilState;
@@ -307,7 +309,34 @@ pub fn init_winit(
                     state.loop_signal.stop();
                 }
 
-                _ => (),
+                WinitEvent::Focus(focused) => {
+                    if focused {
+                        // Release all stuck keys to prevent phantom modifiers
+                        // after Alt+Tab round-trip (the host eats the release).
+                        let Some(keyboard) = state.seat.get_keyboard() else {
+                            return;
+                        };
+                        let pressed = keyboard.pressed_keys();
+                        if !pressed.is_empty() {
+                            tracing::debug!(
+                                "Window regained focus, releasing {} stuck keys",
+                                pressed.len()
+                            );
+                            let time = state.start_time.elapsed().as_millis() as u32;
+                            for keycode in pressed {
+                                let serial = SERIAL_COUNTER.next_serial();
+                                keyboard.input::<(), _>(
+                                    state,
+                                    keycode,
+                                    KeyState::Released,
+                                    serial,
+                                    time,
+                                    |_, _, _| FilterResult::Forward,
+                                );
+                            }
+                        }
+                    }
+                }
             };
         })?;
 
