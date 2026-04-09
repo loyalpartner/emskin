@@ -1,4 +1,5 @@
-use crate::{grabs::resize_grab, state::ClientState, EafvilState};
+use crate::{state::ClientState, EafvilState};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
@@ -24,7 +25,9 @@ impl CompositorHandler for EafvilState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        // All clients are inserted via insert_client with Arc<ClientState>.
+        if let Some(state) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &state.compositor_state;
+        }
         &client
             .get_data::<ClientState>()
             .expect("ClientState missing — client was not inserted via our listener")
@@ -41,7 +44,11 @@ impl CompositorHandler for EafvilState {
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &root))
+                .find(|w| {
+                    w.wl_surface()
+                        .map(|s| *s == root)
+                        .unwrap_or(false)
+                })
             {
                 window.on_commit();
             }
@@ -63,7 +70,6 @@ impl CompositorHandler for EafvilState {
         };
 
         xdg_shell::handle_surface_commit(&mut self.popups, &self.space, surface);
-        resize_grab::handle_commit(&mut self.space, surface);
     }
 }
 

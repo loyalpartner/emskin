@@ -22,7 +22,9 @@ use smithay::{
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::X11Wm,
 };
 
 pub struct EafvilState {
@@ -48,7 +50,12 @@ pub struct EafvilState {
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
     pub xdg_activation_state: XdgActivationState,
+    pub xwayland_shell_state: XWaylandShellState,
     pub popups: PopupManager,
+
+    // XWayland
+    pub xwm: Option<X11Wm>,
+    pub xdisplay: Option<u32>,
 
     pub seat: Seat<Self>,
 
@@ -77,6 +84,9 @@ pub struct EafvilState {
     /// Emacs app_id, forwarded to host toplevel
     pub emacs_app_id: Option<String>,
 
+    /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
+    pub pending_command: Option<(String, Vec<String>)>,
+
     /// Clipboard synchronization proxy (None if host doesn't support data_control)
     pub clipboard: Option<crate::clipboard::ClipboardProxy>,
 }
@@ -101,6 +111,7 @@ impl EafvilState {
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
 
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
@@ -140,7 +151,10 @@ impl EafvilState {
             viewporter_state,
             xdg_decoration_state,
             xdg_activation_state,
+            xwayland_shell_state,
             popups,
+            xwm: None,
+            xdisplay: None,
             seat,
 
             // eafvil specific
@@ -151,6 +165,7 @@ impl EafvilState {
             pending_maximize: None,
             emacs_title: None,
             emacs_app_id: None,
+            pending_command: None,
             clipboard: None,
         })
     }

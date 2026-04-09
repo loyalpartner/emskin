@@ -1,6 +1,5 @@
 pub mod apps;
 mod clipboard;
-mod grabs;
 mod handlers;
 mod input;
 pub mod ipc;
@@ -15,13 +14,17 @@ pub use state::EafvilState;
 #[derive(Parser, Debug)]
 #[command(name = "eafvil")]
 struct Cli {
-    /// Do not spawn Emacs; wait for an external connection.
+    /// Do not spawn a child process; wait for an external connection.
     #[arg(long)]
     no_spawn: bool,
 
-    /// Command to launch Emacs (default: "emacs").
+    /// Program to launch (default: "emacs").
     #[arg(long, default_value = "emacs")]
-    emacs_command: String,
+    command: String,
+
+    /// Arguments for --command.
+    #[arg(long = "arg", num_args = 1)]
+    command_args: Vec<String>,
 
     /// Explicit IPC socket path (default: $XDG_RUNTIME_DIR/eafvil-<pid>.ipc).
     #[arg(long)]
@@ -48,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
     let cli = Cli::parse();
 
-    let mut event_loop: smithay::reexports::calloop::EventLoop<EafvilState> =
+    let mut event_loop: smithay::reexports::calloop::EventLoop<'static, EafvilState> =
         smithay::reexports::calloop::EventLoop::try_new()?;
 
     let display: Display<EafvilState> = Display::new()?;
@@ -85,7 +88,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open a Wayland/X11 window for our nested compositor
     crate::winit::init_winit(&mut event_loop, &mut state)?;
 
-    spawn_emacs(&cli, &mut state);
+    if !cli.no_spawn {
+        state.pending_command = Some((cli.command.clone(), cli.command_args.clone()));
+    }
+
+    start_xwayland(event_loop.handle(), &mut state);
 
     event_loop.run(None, &mut state, |state| {
         if let Some(ref mut child) = state.emacs_child {
@@ -174,27 +181,20 @@ fn register_ipc_source(
     Ok(())
 }
 
-fn spawn_emacs(cli: &Cli, state: &mut EafvilState) {
-    if cli.no_spawn {
-        tracing::info!("--no-spawn: waiting for external Emacs connection");
-        return;
-    }
-
+fn spawn_child(command: &str, args: &[String], x_display: u32, state: &mut EafvilState) {
     let Some(socket_name) = state.socket_name.to_str() else {
-        tracing::error!("Wayland socket name is not valid UTF-8, cannot spawn Emacs");
+        tracing::error!("Wayland socket name is not valid UTF-8, cannot spawn child");
         return;
     };
-    tracing::info!(
-        "Spawning Emacs: {} (WAYLAND_DISPLAY={})",
-        cli.emacs_command,
-        socket_name
-    );
-    match std::process::Command::new(&cli.emacs_command)
+    tracing::info!("Spawning: {command} {args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})");
+    match std::process::Command::new(command)
+        .args(args)
         .env("WAYLAND_DISPLAY", socket_name)
+        .env("DISPLAY", format!(":{x_display}"))
         .spawn()
     {
         Ok(child) => state.emacs_child = Some(child),
-        Err(e) => tracing::error!("Failed to spawn '{}': {}", cli.emacs_command, e),
+        Err(e) => tracing::error!("Failed to spawn '{command}': {e}"),
     }
 }
 
@@ -274,23 +274,29 @@ fn ipc_set_geometry(state: &mut EafvilState, window_id: u64, x: i32, y: i32, w: 
     };
     app.visible = true;
 
-    // Configure the surface to the new size.
     if let Some(toplevel) = app.window.toplevel() {
+        // Wayland path — async configure + pending geometry.
         toplevel.with_pending_state(|s| {
             s.size = Some((w, h).into());
         });
         toplevel.send_pending_configure();
-    }
 
-    if app.geometry.is_none() {
-        // First set_geometry — commit immediately (no previous state to tear against).
+        if app.geometry.is_none() {
+            app.geometry = Some(new_geo);
+            let window = app.window.clone();
+            state.space.map_element(window, (x, y), false);
+        } else {
+            app.pending_geometry = Some(new_geo);
+            app.pending_since = Some(std::time::Instant::now());
+        }
+    } else if let Some(x11) = app.window.x11_surface() {
+        // X11 path — configure takes effect immediately.
+        if let Err(e) = x11.configure(new_geo) {
+            tracing::warn!("X11 configure failed for window_id={window_id}: {e}");
+        }
         app.geometry = Some(new_geo);
         let window = app.window.clone();
         state.space.map_element(window, (x, y), false);
-    } else {
-        // Subsequent — write pending, wait for client buffer commit.
-        app.pending_geometry = Some(new_geo);
-        app.pending_since = Some(std::time::Instant::now());
     }
 }
 
@@ -299,6 +305,10 @@ fn ipc_close(state: &mut EafvilState, window_id: u64) {
     if let Some(app) = state.apps.get_mut(window_id) {
         if let Some(toplevel) = app.window.toplevel() {
             toplevel.send_close();
+        } else if let Some(x11) = app.window.x11_surface() {
+            if let Err(e) = x11.close() {
+                tracing::warn!("X11 close failed for window_id={window_id}: {e}");
+            }
         }
     }
 }
@@ -331,10 +341,12 @@ fn ipc_forward_key(
     tracing::debug!("IPC forward_key window={window_id} key={keycode} state={key_state}");
 
     // Clone the target surface to release the borrow on state.apps.
-    let target = state
-        .apps
-        .get(window_id)
-        .and_then(|app| app.window.toplevel().map(|t| t.wl_surface().clone()));
+    let target = state.apps.get(window_id).and_then(|app| {
+        app.window
+            .toplevel()
+            .map(|t| t.wl_surface().clone())
+            .or_else(|| app.window.x11_surface().and_then(|x| x.wl_surface()))
+    });
     let Some(target) = target else {
         tracing::warn!("forward_key: unknown window_id={window_id}");
         return;
@@ -457,6 +469,70 @@ fn ipc_promote_mirror(state: &mut EafvilState, window_id: u64, view_id: u64) {
         app.geometry = Some(mv.geometry);
         let window = app.window.clone();
         state.space.map_element(window, mv.geometry.loc, false);
+    }
+}
+
+fn start_xwayland(
+    handle: smithay::reexports::calloop::LoopHandle<'static, EafvilState>,
+    state: &mut EafvilState,
+) {
+    use smithay::xwayland::{XWayland, XWaylandEvent};
+
+    let dh = state.display_handle.clone();
+
+    let (xwayland, client) = match XWayland::spawn(
+        &dh,
+        None,
+        std::iter::empty::<(String, String)>(),
+        true,
+        std::process::Stdio::null(),
+        std::process::Stdio::null(),
+        |_| (),
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            tracing::error!("Failed to start XWayland: {e}");
+            return;
+        }
+    };
+
+    let inner_handle = handle.clone();
+    if let Err(e) = handle.insert_source(xwayland, move |event, _, state| match event {
+        XWaylandEvent::Ready {
+            x11_socket,
+            display_number,
+        } => {
+            let wm = smithay::xwayland::X11Wm::start_wm(
+                inner_handle.clone(),
+                &dh,
+                x11_socket,
+                client.clone(),
+            );
+            match wm {
+                Ok(wm) => {
+                    state.xwm = Some(wm);
+                    state.xdisplay = Some(display_number);
+                    std::env::set_var("DISPLAY", format!(":{display_number}"));
+                    state.ipc.send(ipc::OutgoingMessage::XWaylandReady {
+                        display: display_number,
+                    });
+                    tracing::info!("XWayland ready on :{display_number}");
+
+                    // Spawn child now that both WAYLAND_DISPLAY and DISPLAY are set.
+                    if let Some((cmd, args)) = state.pending_command.take() {
+                        spawn_child(&cmd, &args, display_number, state);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start X11 WM: {e}");
+                }
+            }
+        }
+        XWaylandEvent::Error => {
+            tracing::warn!("XWayland crashed on startup");
+        }
+    }) {
+        tracing::error!("Failed to insert XWayland source: {e}");
     }
 }
 

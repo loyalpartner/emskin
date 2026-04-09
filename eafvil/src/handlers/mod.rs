@@ -1,6 +1,7 @@
 mod compositor;
 mod xdg_activation;
 mod xdg_shell;
+mod xwayland;
 
 use crate::EafvilState;
 

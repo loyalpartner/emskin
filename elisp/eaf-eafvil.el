@@ -514,11 +514,10 @@ Covers the full window width (including fringes) but excludes the mode-line."
   :group 'eaf-eafvil)
 
 (defun eaf-eafvil--process-env-with-token (token)
-  "Build process-environment with XDG_ACTIVATION_TOKEN and WAYLAND_DISPLAY."
-  (append
-   (when token (list (format "XDG_ACTIVATION_TOKEN=%s" token)))
-   (list (format "WAYLAND_DISPLAY=%s" (or (getenv "WAYLAND_DISPLAY") "")))
-   process-environment))
+  "Build process-environment with XDG_ACTIVATION_TOKEN."
+  (if token
+      (cons (format "XDG_ACTIVATION_TOKEN=%s" token) process-environment)
+    process-environment))
 
 (defun eaf-eafvil--launch-with-token (callback)
   "Request an activation token, then call CALLBACK with the token string.

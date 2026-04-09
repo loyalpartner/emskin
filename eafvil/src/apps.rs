@@ -7,6 +7,7 @@ use smithay::{
     desktop::{PopupManager, Window},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{IsAlive, Logical, Point, Rectangle},
+    wayland::seat::WaylandFocus,
 };
 
 /// An embedded EAF application window.
@@ -42,22 +43,33 @@ pub struct SurfaceLayer {
 
 impl AppWindow {
     /// Collect the full surface stack: toplevel (offset=0,0) + all popups (recursive).
+    /// For Wayland windows this includes xdg popups; for X11 windows just the surface.
     pub fn surface_layers(&self) -> Vec<SurfaceLayer> {
-        let Some(toplevel) = self.window.toplevel() else {
-            return Vec::new();
-        };
-        let wl = toplevel.wl_surface();
-        let mut layers = vec![SurfaceLayer {
-            surface: wl.clone(),
-            offset: (0, 0).into(),
-        }];
-        for (popup, offset) in PopupManager::popups_for_surface(wl) {
-            layers.push(SurfaceLayer {
-                surface: popup.wl_surface().clone(),
-                offset,
-            });
+        if let Some(toplevel) = self.window.toplevel() {
+            let wl = toplevel.wl_surface();
+            let mut layers = vec![SurfaceLayer {
+                surface: wl.clone(),
+                offset: (0, 0).into(),
+            }];
+            for (popup, offset) in PopupManager::popups_for_surface(wl) {
+                layers.push(SurfaceLayer {
+                    surface: popup.wl_surface().clone(),
+                    offset,
+                });
+            }
+            layers
+        } else if let Some(x11) = self.window.x11_surface() {
+            x11.wl_surface()
+                .map(|s| {
+                    vec![SurfaceLayer {
+                        surface: s,
+                        offset: (0, 0).into(),
+                    }]
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         }
-        layers
     }
 }
 
@@ -98,11 +110,11 @@ impl AppManager {
         self.windows.values_mut()
     }
 
-    /// Find the window_id for a given Wayland surface.
+    /// Find the window_id for a given Wayland surface (works for both Wayland and X11 windows).
     pub fn id_for_surface(&self, wl: &WlSurface) -> Option<u64> {
         self.windows
             .values()
-            .find(|w| w.window.toplevel().is_some_and(|t| t.wl_surface() == wl))
+            .find(|w| w.window.wl_surface().map(|s| &*s == wl).unwrap_or(false))
             .map(|w| w.window_id)
     }
 
@@ -110,7 +122,7 @@ impl AppManager {
     pub fn get_mut_by_surface(&mut self, wl: &WlSurface) -> Option<&mut AppWindow> {
         self.windows
             .values_mut()
-            .find(|w| w.window.toplevel().is_some_and(|t| t.wl_surface() == wl))
+            .find(|w| w.window.wl_surface().map(|s| &*s == wl).unwrap_or(false))
     }
 
     /// Collect EAF app windows whose pending geometry has timed out.

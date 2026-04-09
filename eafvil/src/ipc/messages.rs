@@ -89,4 +89,8 @@ pub enum OutgoingMessage {
     ActivationToken {
         token: String,
     },
+    /// XWayland is ready — Emacs can set DISPLAY=:<display> for X11 apps.
+    XWaylandReady {
+        display: u32,
+    },
 }
