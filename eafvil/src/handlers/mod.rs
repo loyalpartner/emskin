@@ -71,6 +71,19 @@ impl SelectionHandler for EafvilState {
         };
         if let Some(source) = source {
             let mime_types = source.mime_types();
+
+            // Skip the first selection set per target — Emacs/GTK initializes
+            // clipboard on startup which would override the host's clipboard.
+            let init_done = match ty {
+                SelectionTarget::Clipboard => &mut self.clipboard_init_done,
+                SelectionTarget::Primary => &mut self.primary_init_done,
+            };
+            if !*init_done {
+                *init_done = true;
+                tracing::debug!("Skipping initial {ty:?} selection (startup)");
+                return;
+            }
+
             tracing::debug!("Internal selection set ({ty:?}): {mime_types:?}");
             clipboard.set_host_selection(ty, &mime_types);
         } else {
@@ -89,7 +102,7 @@ impl SelectionHandler for EafvilState {
     ) {
         // Internal client wants to paste our compositor-injected (host) selection.
         // Forward the fd directly to the host so the host source writes into it.
-        if let Some(ref clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.clipboard {
             tracing::debug!("Forwarding host selection to internal client ({ty:?}, {mime_type})");
             clipboard.receive_from_host(ty, &mime_type, fd);
         }

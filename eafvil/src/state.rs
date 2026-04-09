@@ -4,7 +4,9 @@ use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
-        calloop::{generic::Generic, EventLoop, Interest, LoopSignal, Mode, PostAction},
+        calloop::{
+            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+        },
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
@@ -37,6 +39,7 @@ pub struct EafvilState {
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
+    pub loop_handle: LoopHandle<'static, EafvilState>,
 
     // Smithay State
     pub compositor_state: CompositorState,
@@ -87,13 +90,19 @@ pub struct EafvilState {
     /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
     pub pending_command: Option<(String, Vec<String>)>,
 
-    /// Clipboard synchronization proxy (None if host doesn't support data_control)
-    pub clipboard: Option<crate::clipboard::ClipboardProxy>,
+    /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
+    pub clipboard: Option<crate::clipboard::HostClipboard>,
+
+    /// First internal selection per target already seen (and skipped).
+    /// Emacs/GTK sets clipboard on startup; we skip that to avoid overriding the host.
+    pub clipboard_init_done: bool,
+    pub primary_init_done: bool,
 }
 
 impl EafvilState {
     pub fn new(
         event_loop: &mut EventLoop<Self>,
+        loop_handle: LoopHandle<'static, Self>,
         display: Display<Self>,
         ipc: crate::ipc::IpcServer,
         xkb_config: smithay::input::keyboard::XkbConfig<'_>,
@@ -138,6 +147,7 @@ impl EafvilState {
 
             space,
             loop_signal,
+            loop_handle,
             socket_name,
 
             compositor_state,
@@ -167,6 +177,8 @@ impl EafvilState {
             emacs_app_id: None,
             pending_command: None,
             clipboard: None,
+            clipboard_init_done: false,
+            primary_init_done: false,
         })
     }
 

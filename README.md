@@ -77,11 +77,32 @@ Options:
 加载 Elisp 客户端：
 
 ```elisp
-(add-to-list 'load-path "/path/to/eafvil/elisp")
+(add-to-list 'load-path "/path/to/mvp/elisp")
 (require 'eaf-eafvil)
 ```
 
 客户端会通过父进程 PID 自动发现 IPC socket 并连接。连接后 Emacs 窗口大小变化会自动同步给合成器。
+
+### 启动应用
+
+在 Emacs 中通过 `M-x` 调用：
+
+**Demo 应用**（`demo/` 目录下的 Python PyQt6 应用）：
+
+```
+M-x eaf-open-app RET demo      — 交互式 Demo（文本输入、按钮、键盘事件）
+M-x eaf-open-app RET caliper   — 几何对齐调试工具（边框标尺、坐标标签）
+```
+
+**原生应用**（任意 Wayland/X11 程序）：
+
+```
+M-x eaf-open-native-app RET firefox     — 启动 Firefox
+M-x eaf-open-native-app RET foot        — 启动 foot 终端
+M-x eaf-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
+```
+
+应用启动后会自动获取 xdg_activation 令牌和焦点，窗口位置由 Emacs 通过 IPC 控制。
 
 ## 项目结构
 

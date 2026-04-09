@@ -1,5 +1,6 @@
 pub mod apps;
 mod clipboard;
+mod clipboard_x11;
 mod handlers;
 mod input;
 pub mod ipc;
@@ -75,10 +76,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let ipc = crate::ipc::IpcServer::bind(ipc_path)?;
-    let mut state = EafvilState::new(&mut event_loop, display, ipc, xkb_config)?;
+    let loop_handle = event_loop.handle();
+    let mut state = EafvilState::new(&mut event_loop, loop_handle, display, ipc, xkb_config)?;
 
-    // Initialize clipboard synchronization with host compositor
-    state.clipboard = clipboard::ClipboardProxy::new();
+    // Initialize clipboard synchronization with host compositor.
+    // Try Wayland data_control first; fall back to X11 selection protocol.
+    state.clipboard = clipboard::ClipboardProxy::new()
+        .map(clipboard::HostClipboard::Wayland)
+        .or_else(|| clipboard_x11::X11ClipboardProxy::new().map(clipboard::HostClipboard::X11));
     if let Some(ref clipboard) = state.clipboard {
         register_clipboard_source(&mut event_loop, clipboard)?;
     }
@@ -124,8 +129,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_mut()
             .map(|c| c.take_events())
             .unwrap_or_default();
+        let has_clipboard_events = !clipboard_events.is_empty();
         for event in clipboard_events {
             handle_clipboard_event(state, event);
+        }
+        // Flush immediately so Wayland clients see selection changes / send
+        // requests without waiting for the next render frame.
+        if has_clipboard_events {
+            let _ = state.display_handle.flush_clients();
         }
 
         // Evict activation tokens older than 30s to prevent unbounded growth.
@@ -186,11 +197,19 @@ fn spawn_child(command: &str, args: &[String], x_display: u32, state: &mut Eafvi
         tracing::error!("Wayland socket name is not valid UTF-8, cannot spawn child");
         return;
     };
-    tracing::info!("Spawning: {command} {args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})");
+    tracing::info!(
+        "Spawning: {command} {args:?} (WAYLAND_DISPLAY={socket_name} DISPLAY=:{x_display})"
+    );
     match std::process::Command::new(command)
         .args(args)
         .env("WAYLAND_DISPLAY", socket_name)
         .env("DISPLAY", format!(":{x_display}"))
+        // Ensure child apps prefer Wayland even when host is X11.
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env("GDK_BACKEND", "wayland,x11")
+        .env("QT_QPA_PLATFORM", "wayland;xcb")
+        .env("SDL_VIDEODRIVER", "wayland")
+        .env("CLUTTER_BACKEND", "wayland")
         .spawn()
     {
         Ok(child) => state.emacs_child = Some(child),
@@ -538,7 +557,7 @@ fn start_xwayland(
 
 fn register_clipboard_source(
     event_loop: &mut smithay::reexports::calloop::EventLoop<EafvilState>,
-    clipboard: &clipboard::ClipboardProxy,
+    clipboard: &clipboard::HostClipboard,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -574,11 +593,24 @@ fn handle_clipboard_event(state: &mut EafvilState, event: clipboard::ClipboardEv
             inject_host_selection(state, target, mime_types);
         }
         ClipboardEvent::HostSendRequest {
+            id,
             target,
             mime_type,
-            fd,
+            write_fd,
+            read_fd,
         } => {
-            forward_client_selection(state, target, mime_type, fd);
+            forward_client_selection(state, target, mime_type, write_fd);
+            // Flush immediately so the write_fd reaches the Wayland client
+            // before our OwnedFd copy is dropped (closing the write end).
+            let _ = state.display_handle.flush_clients();
+            if let Some(read_fd) = read_fd {
+                if !register_outgoing_pipe(state, id, read_fd) {
+                    // Calloop registration failed — clean up and notify X11 requestor.
+                    if let Some(ref mut cb) = state.clipboard {
+                        cb.complete_outgoing(id, Vec::new());
+                    }
+                }
+            }
         }
         ClipboardEvent::SourceCancelled { target } => {
             tracing::debug!("Host source cancelled ({target:?})");
@@ -618,6 +650,48 @@ fn inject_host_selection(
             }
         }
     }
+}
+
+/// Register a pipe read_fd with calloop for event-driven reading.
+/// Returns `false` if registration fails (caller should clean up).
+fn register_outgoing_pipe(state: &mut EafvilState, id: u64, read_fd: std::os::fd::OwnedFd) -> bool {
+    use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
+    use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+
+    // SAFETY: into_raw_fd() relinquishes ownership; File takes it over.
+    let file = unsafe { std::fs::File::from_raw_fd(read_fd.into_raw_fd()) };
+    let mut buf_data: Vec<u8> = Vec::new();
+
+    if let Err(e) = state.loop_handle.insert_source(
+        Generic::new(file, Interest::READ, Mode::Level),
+        move |_, file, state| {
+            let mut buf = [0u8; 65536];
+            loop {
+                // SAFETY: buf is valid for buf.len() bytes; fd is open and non-blocking.
+                let n = unsafe { libc::read(file.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+                if n > 0 {
+                    buf_data.extend_from_slice(&buf[..n as usize]);
+                } else if n == 0 {
+                    let data = std::mem::take(&mut buf_data);
+                    if let Some(ref mut clipboard) = state.clipboard {
+                        clipboard.complete_outgoing(id, data);
+                    }
+                    return Ok(PostAction::Remove);
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        return Ok(PostAction::Continue);
+                    }
+                    tracing::warn!("outgoing pipe read error: {err}");
+                    return Ok(PostAction::Remove);
+                }
+            }
+        },
+    ) {
+        tracing::warn!("Failed to register outgoing pipe: {e}");
+        return false;
+    }
+    true
 }
 
 fn forward_client_selection(

@@ -1,3 +1,4 @@
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::{
     delegate_xdg_activation,
     utils::SERIAL_COUNTER,
@@ -5,7 +6,6 @@ use smithay::{
         XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
     },
 };
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
 use crate::EafvilState;
 
