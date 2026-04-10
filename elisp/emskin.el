@@ -220,11 +220,17 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
       (setq-local emskin--window-id window-id)
       (setq-local mode-name "EAF")
       (setq-local buffer-read-only t)
+      (setq-local left-fringe-width 0)
+      (setq-local right-fringe-width 0)
+      (setq-local left-margin-width 0)
+      (setq-local right-margin-width 0)
+      (setq-local cursor-type nil)
       (add-hook 'kill-buffer-hook #'emskin--kill-buffer-hook nil t)
       (add-hook 'post-command-hook #'emskin--post-command-prefix-done nil t))
     (display-buffer buf '((display-buffer-use-some-window)
                           (inhibit-same-window . t)))
     (when-let ((win (get-buffer-window buf t)))
+      (set-window-scroll-bars win 0 nil 0 nil)
       (emskin--report-geometry window-id win))
     (message "emskin: embedded app ready (id=%s)" window-id)))
 
@@ -320,15 +326,14 @@ Computed once when the compositor reports the surface size."
 (defun emskin--window-geometry (window)
   "Return (x y w h) in pixels for Emacs WINDOW.
 Coordinates are relative to the top-left of the Wayland surface.
-Covers the full window width (including fringes) but excludes the mode-line."
-  (let* ((edges (window-pixel-edges window))
-         (body-edges (window-body-pixel-edges window))
-         (x (nth 0 edges))
-         (raw-y (nth 1 edges))
-         (y (+ raw-y (emskin--frame-header-offset (window-frame window))))
-         (w (- (nth 2 edges) x))
-         ;; body-bottom = top of mode-line; stop there so mode-line stays visible.
-         (h (- (nth 3 body-edges) raw-y)))
+Covers the body area (excludes fringes, margins, header-line, mode-line)."
+  (let* ((body (window-body-pixel-edges window))
+         (off (emskin--frame-header-offset (window-frame window)))
+         (x (nth 0 body))
+         (raw-y (nth 1 body))
+         (y (+ raw-y off))
+         (w (- (nth 2 body) x))
+         (h (- (nth 3 body) raw-y)))
     (list x y w h)))
 
 (defun emskin-debug-geometry ()
@@ -400,6 +405,8 @@ Covers the full window width (including fringes) but excludes the mode-line."
       (dolist (win (window-list fr 'no-minibuf))
         (when-let ((wid (buffer-local-value 'emskin--window-id
                                             (window-buffer win))))
+          (unless (zerop (or (car (window-scroll-bars win)) 0))
+            (set-window-scroll-bars win 0 nil 0 nil))
           (puthash wid (append (gethash wid wid-wins) (list win)) wid-wins))))
     ;; Pass 2: for each EAF buffer, sync source + mirrors.
     (dolist (buf (buffer-list))
