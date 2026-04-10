@@ -69,6 +69,7 @@ pub struct EmskinState {
     pub dmabuf_state: DmabufState,
     /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
     pub dmabuf_global: Option<DmabufGlobal>,
+    pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
     pub popups: PopupManager,
 
     // XWayland
@@ -131,6 +132,13 @@ pub struct EmskinState {
     /// label hit-test. The matching release must also be swallowed so the
     /// downstream surface never sees an unpaired release.
     pub skeleton_click_absorbed: bool,
+
+    /// Tracks text_input focus for manual enter/leave management.
+    pub text_input_focus: Option<WlSurface>,
+
+    /// Deferred `set_ime_allowed` for the winit window. Set in `focus_changed`
+    /// (which cannot access the backend) and applied in `apply_pending_state`.
+    pub pending_ime_allowed: Option<bool>,
 }
 
 impl EmskinState {
@@ -155,6 +163,8 @@ impl EmskinState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+        let text_input_manager_state =
+            smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
 
         let dmabuf_state = DmabufState::new();
 
@@ -202,6 +212,7 @@ impl EmskinState {
             xwayland_shell_state,
             dmabuf_state,
             dmabuf_global: None,
+            text_input_manager_state,
             popups,
             xwm: None,
             xdisplay: None,
@@ -224,6 +235,8 @@ impl EmskinState {
             crosshair: crate::crosshair::CrosshairOverlay::new(),
             skeleton: crate::skeleton::SkeletonOverlay::new(),
             skeleton_click_absorbed: false,
+            text_input_focus: None,
+            pending_ime_allowed: None,
         })
     }
 

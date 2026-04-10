@@ -49,10 +49,38 @@ impl SeatHandler for EmskinState {
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+
+        // Bridge text_input enter/leave — smithay's keyboard handler
+        // gates these behind has_instance() which is always false here.
+        use smithay::wayland::text_input::TextInputSeat;
+        let ti = seat.text_input();
+        let old = self.text_input_focus.take();
+        let new = focused.cloned();
+        if old.as_ref() != new.as_ref() {
+            if old.is_some() {
+                ti.set_focus(old);
+                ti.leave();
+            }
+            ti.set_focus(new.clone());
+            if new.is_some() {
+                ti.enter();
+            }
+        }
+        self.text_input_focus = new;
+
+        // Only enable host IME when the focused client has bound text_input_v3.
+        // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
+        // and need raw keyboard events from wl_keyboard instead.
+        let mut has_ti = false;
+        ti.with_focused_text_input(|_, _| { has_ti = true; });
+        if self.pending_ime_allowed != Some(has_ti) {
+            self.pending_ime_allowed = Some(has_ti);
+        }
     }
 }
 
 delegate_seat!(EmskinState);
+smithay::delegate_text_input_manager!(EmskinState);
 
 //
 // Wl Data Device

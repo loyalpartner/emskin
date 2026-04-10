@@ -19,16 +19,21 @@ emskin 是一个嵌套 Wayland 合成器：在一个 winit 窗口内运行独立
 - **任意程序嵌入** — 原生 Wayland 与 XWayland 双协议支持，可承载 GTK / Qt / Electron / X11 程序
 - **Emacs 控制几何** — 每个嵌入窗口的位置、大小、可见性、焦点均由 Emacs 通过 IPC 精确控制
 - **窗口镜像** — 同一个程序可在多个 Emacs 窗口中显示（GPU 纹理共享，零拷贝）
+- **中文/日文/韩文输入法** — 纯 Wayland 客户端（Chrome）通过 text_input_v3 桥接宿主 IME；GTK/Qt 客户端（Firefox）通过 fcitx5-gtk 直连，两条路径自动切换互不干扰
 - **主机剪贴板双向同步**（Wayland 与 X11）
+- **GPU 缓冲区共享** — linux-dmabuf 协议支持硬件加速客户端
 - **Popup 支持**（右键菜单、下拉框、补全浮层等）
 - **xdg_activation_v1 焦点转移**（启动新应用时自动获取焦点）
 - **通过 CLI 参数指定键盘布局**（`--xkb-layout` 等）
+
+> **注意：** 目前仅适配了 pgtk (pure GTK) 版本的 Emacs。GTK3 X11 版本尚未适配，窗口几何计算会有偏差。推荐使用 `emacs --with-pgtk` 编译的版本。
 
 ## 依赖
 
 - Rust 1.70+
 - Wayland 开发库
-- [smithay](https://github.com/Smithay/smithay)（自动从 Git 拉取）
+- Emacs（pgtk 版本）
+- [smithay](https://github.com/loyalpartner/smithay)（fork，自动从 Git 拉取）
 
 Arch Linux:
 
@@ -149,9 +154,9 @@ demo/           演示应用
 
 Emacs 与合成器通过 Unix socket 通信，使用长度前缀 JSON 协议。
 
-**Emacs -> 合成器:** `set_geometry`, `close`, `set_visibility`, `forward_key`, `add_mirror`, `update_mirror_geometry`, `remove_mirror`, `promote_mirror`
+**Emacs -> 合成器:** `set_geometry`, `close`, `set_visibility`, `forward_key`, `add_mirror`, `update_mirror_geometry`, `remove_mirror`, `promote_mirror`, `request_activation_token`
 
-**合成器 -> Emacs:** `connected`, `surface_size`, `window_created`, `window_destroyed`, `title_changed`
+**合成器 -> Emacs:** `connected`, `surface_size`, `window_created`, `window_destroyed`, `title_changed`, `focus_view`, `activation_token`, `xwayland_ready`
 
 ## License
 

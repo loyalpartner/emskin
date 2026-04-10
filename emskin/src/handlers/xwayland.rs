@@ -18,8 +18,21 @@ impl XwmHandler for EmskinState {
             .expect("xwm_state called before XWayland ready")
     }
 
-    fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
-    fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+    fn new_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        tracing::debug!(
+            "X11 new_window: title={:?} OR={} geo={:?}",
+            window.title(),
+            window.is_override_redirect(),
+            window.geometry()
+        );
+    }
+    fn new_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        tracing::info!(
+            "X11 new_override_redirect_window: title={:?} geo={:?}",
+            window.title(),
+            window.geometry()
+        );
+    }
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
         window.set_mapped(true).unwrap();
@@ -50,6 +63,11 @@ impl XwmHandler for EmskinState {
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
         let geo = window.geometry();
+        let has_surface = window.wl_surface().is_some();
+        tracing::info!(
+            "X11 OR window mapped: geo={geo:?} has_wl_surface={has_surface} title={:?}",
+            window.title()
+        );
         let win = Window::new_x11_window(window);
         self.space.map_element(win, geo.loc, true);
     }
@@ -110,9 +128,13 @@ impl XwmHandler for EmskinState {
                 .elements()
                 .find(|e| e.x11_surface() == Some(&window))
                 .cloned();
-            if let Some(elem) = elem {
-                self.space.map_element(elem, geometry.loc, false);
+            if let Some(ref elem) = elem {
+                self.space.map_element(elem.clone(), geometry.loc, false);
             }
+            tracing::debug!(
+                "X11 OR configure_notify: geo={geometry:?} found_in_space={}",
+                elem.is_some()
+            );
         }
     }
 

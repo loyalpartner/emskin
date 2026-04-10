@@ -2,7 +2,8 @@
 
 ## Build
 - `cargo check` / `cargo clippy -- -D warnings` / `cargo fmt`
-- smithay: local path dependency (see `Cargo.toml`). Upstream: `git clone https://github.com/Smithay/smithay.git`
+- smithay: forked at `loyalpartner/smithay` branch `emskin-patches`. Upstream: `Smithay/smithay`
+- smithay patches: `backend/winit/mod.rs` (expose `WinitEvent::Ime`, 8-bit pixel format priority), `text_input/text_input_handle.rs` (remove `has_instance()` guard, add `cursor_rectangle` accessor), `selection/seat_data.rs` (fix GTK3 clipboard on focus change)
 
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
@@ -11,6 +12,7 @@
 - Elisp client: `elisp/emskin.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
 - Mirror system: same embedded program displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
+- IME input: text_input_v3 bridges host IME (via winit Ime events) to embedded Wayland clients (Chrome). GTK/Qt apps use their own IM module (fcitx5-gtk via DBus) and are unaffected — `set_ime_allowed` is only enabled when the focused client has bound text_input_v3. Smithay patches required: expose `WinitEvent::Ime`, remove `has_instance()` guard in text_input dispatch, add `cursor_rectangle()` accessor
 - `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
 - grabs/ directory is placeholder code for future move/resize support
 
@@ -41,6 +43,12 @@
 - `render_elements!` macro cannot parse associated-type bounds (`Renderer<TextureId = GlesTexture>`) — define a blanket helper trait as workaround
 - Custom overlays: `SolidColorRenderElement` for shapes, `MemoryRenderBuffer` + bitmap font for text. `CommitCounter` must be stored in struct and incremented on change — `default()` every frame defeats damage tracking
 - Elisp `defcustom` with `:set` that references later-defined vars: use `:initialize #'custom-initialize-default` + `bound-and-true-p` to avoid void-variable at load time
+- IME: registering `TextInputManagerState` causes fcitx5-gtk to switch from DBus to text_input_v3 path — must dynamically toggle `set_ime_allowed` per focused client (only enable when client has bound text_input_v3, check via `with_focused_text_input`)
+- IME: smithay's keyboard.rs gates `text_input.enter()/leave()` behind `input_method.has_instance()` — without input_method, must manually call enter/leave in `SeatHandler::focus_changed` with temporary focus swap to send leave to the correct old client
+- IME: `pending_ime_allowed: Option<bool>` pattern — `focus_changed` cannot access winit backend, so deferred to `apply_pending_state` (same pattern as `pending_fullscreen`/`pending_maximize`)
+- Elisp: use `window-body-pixel-edges` for embedded app geometry (excludes fringes/margins/header-line/mode-line). Set buffer-local `left-fringe-width`, `right-fringe-width`, `left-margin-width`, `right-margin-width` to 0 and `cursor-type` to nil for EAF buffers
+- Elisp: `set-window-scroll-bars` is non-persistent across buffer switches — re-apply in `emskin--sync-all` with `window-scroll-bars` change-detection guard
+- Elisp skeleton: guard bar height fallback with `frame-parameter 'menu-bar-lines/tool-bar-lines/tab-bar-lines` — pgtk fallback incorrectly derives non-zero heights for disabled bars without this check
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)
@@ -48,3 +56,5 @@
 - wl_seat (keyboard + pointer)
 - wl_data_device (DnD)
 - fractional_scale, viewporter
+- text_input_v3 (IME bridge to host — see smithay fork patches)
+- linux-dmabuf (GPU buffer sharing for hardware-accelerated clients)
