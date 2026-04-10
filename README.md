@@ -66,7 +66,9 @@ eafvil [OPTIONS]
 
 Options:
   --no-spawn              不启动 Emacs，等待外部连接
-  --emacs-command <CMD>   Emacs 启动命令 (默认: "emacs")
+  --command <CMD>         启动命令 (默认: "emacs")
+  --arg <ARG>             命令参数 (可多次指定)
+  --standalone            独立模式：自动加载内置 elisp，无需用户配置
   --ipc-path <PATH>       指定 IPC socket 路径 (默认: $XDG_RUNTIME_DIR/eafvil-<pid>.ipc)
   --xkb-layout <LAYOUT>   键盘布局 (例: "us", "cn")
   --xkb-model <MODEL>     键盘型号 (例: "pc105")
@@ -76,7 +78,17 @@ Options:
 
 ### Emacs 集成
 
-加载 Elisp 客户端：
+**方式一：独立模式（零配置）**
+
+使用 `--standalone` 参数，eafvil 会自动将内置的 elisp 文件注入 Emacs，无需修改 init.el：
+
+```bash
+./target/release/eafvil --standalone
+```
+
+**方式二：手动配置**
+
+在 Emacs init.el 中加载 elisp 客户端：
 
 ```elisp
 (add-to-list 'load-path "/path/to/mvp/elisp")
