@@ -144,6 +144,28 @@ M-x emskin-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
 
 应用启动后会自动获取焦点，窗口位置由 Emacs 通过 IPC 控制。
 
+**启动器**（rofi/wofi 等 wlr-layer-shell 应用）：
+
+emskin 支持 wlr-layer-shell 协议，可以直接运行 rofi/wofi 等启动器。Emacs 内部运行在 emskin 中，`start-process` 启动的程序自动连接到 emskin，无需额外配置。
+
+在 init.el 中绑定快捷键：
+
+```elisp
+(defun my/emskin-rofi ()
+  "Launch rofi application launcher."
+  (interactive)
+  (start-process "rofi" nil
+                 "setsid" "rofi"
+                 "-combi-modi" "drun,ssh"
+                 "-show" "combi"
+                 "-terminal" "foot"
+                 "-font" "JetBrainsMono Nerd Font"
+                 "-show-icons" "-i"))
+(global-set-key (kbd "C-c r") #'my/emskin-rofi)
+```
+
+> **提示**：使用 `setsid` 让 rofi 在独立会话中运行，确保从 rofi 启动的程序不受 Emacs 进程组影响。
+
 ## 项目结构
 
 ```
