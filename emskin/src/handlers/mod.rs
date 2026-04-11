@@ -108,15 +108,12 @@ impl SelectionHandler for EmskinState {
         if let Some(source) = source {
             let mime_types = source.mime_types();
 
-            // Skip the first selection set per target — Emacs/GTK initializes
-            // clipboard on startup which would override the host's clipboard.
-            let init_done = match ty {
-                SelectionTarget::Clipboard => &mut self.clipboard_init_done,
-                SelectionTarget::Primary => &mut self.primary_init_done,
-            };
-            if !*init_done {
-                *init_done = true;
-                tracing::debug!("Skipping initial {ty:?} selection (startup)");
+            // Skip selections that arrive before Emacs IPC connects —
+            // GTK/Emacs announces clipboard ownership on startup which
+            // would clear the host clipboard. Real user copies only
+            // happen after emskin.el connects.
+            if !self.ipc.is_connected() {
+                tracing::debug!("Skipping pre-IPC {ty:?} selection (startup)");
                 return;
             }
 
