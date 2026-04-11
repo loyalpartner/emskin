@@ -39,30 +39,41 @@ sudo pacman -S wayland libxkbcommon mesa
 # 编译
 cd emskin && cargo build --release
 
-# 启动（自动运行 Emacs）
-./target/release/emskin
-
-# 或零配置独立模式
+# 零配置体验（自动加载内置 elisp，无需任何 Emacs 配置）
 ./target/release/emskin --standalone
 ```
 
-## Emacs 配置
+## 使用
 
-```elisp
-(add-to-list 'load-path "/path/to/emskin/elisp")
-(require 'emskin)
-```
+### 打开嵌入程序
 
-使用 `--standalone` 模式则无需配置。
-
-## 启动嵌入程序
+在 emskin 内的 Emacs 中：
 
 ```
 M-x emskin-open-native-app RET firefox
 M-x emskin-open-native-app RET foot
 ```
 
-也可以绑定快捷键启动 rofi 等启动器：
+程序会自动嵌入当前 Emacs 窗口，并获得键盘焦点。
+
+### 键盘交互
+
+嵌入程序获焦时，键盘输入直接发送给它。Emacs 前缀键（`C-x`、`C-c`、`M-x`）会被自动拦截并送回 Emacs，完成组合键后焦点自动恢复。
+
+- `C-x o` — 切换 Emacs 窗口（嵌入程序随 buffer 切换自动获焦）
+- `C-x 1` / `C-x 2` / `C-x 3` — 正常的窗口操作，嵌入程序自动调整大小
+
+### 工作区
+
+每个 Emacs frame 对应一个工作区：
+
+- `C-x 5 2` — 新建工作区
+- `C-x 5 o` — 切换工作区
+- `C-x 5 0` — 关闭当前工作区
+
+### 使用启动器
+
+绑定快捷键启动 rofi 等启动器：
 
 ```elisp
 (defun my/emskin-rofi ()
@@ -76,15 +87,25 @@ M-x emskin-open-native-app RET foot
 (global-set-key (kbd "C-c r") #'my/emskin-rofi)
 ```
 
+## Emacs 配置
+
+不使用 `--standalone` 时，需要手动加载 elisp：
+
+```elisp
+(add-to-list 'load-path "/path/to/emskin/elisp")
+(require 'emskin)
+```
+
 ## CLI 参数
 
 ```
 emskin [OPTIONS]
 
+  --standalone            独立模式，自动加载内置 elisp（推荐初次体验）
   --no-spawn              不启动 Emacs，等待外部连接
   --command <CMD>         启动命令 (默认: "emacs")
   --arg <ARG>             命令参数 (可多次指定)
-  --standalone            独立模式，自动加载内置 elisp
+  --bar <MODE>            工作区栏: "builtin" (默认) 或 "none"
   --xkb-layout <LAYOUT>   键盘布局 (例: "us", "cn")
 ```
 
