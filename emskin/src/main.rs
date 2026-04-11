@@ -380,8 +380,13 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, x: i32, y: i32, w: 
 
     if let Some(toplevel) = app.window.toplevel() {
         // Wayland path — async configure + pending geometry.
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
         toplevel.with_pending_state(|s| {
             s.size = Some((w, h).into());
+            s.states.set(xdg_toplevel::State::TiledLeft);
+            s.states.set(xdg_toplevel::State::TiledRight);
+            s.states.set(xdg_toplevel::State::TiledTop);
+            s.states.set(xdg_toplevel::State::TiledBottom);
         });
         toplevel.send_pending_configure();
 
