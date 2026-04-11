@@ -76,9 +76,6 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (defvar emskin--next-view-id 0
   "Counter for generating unique mirror view IDs.")
 
-(defvar emskin--pending-activations nil
-  "Queue of callbacks awaiting activation tokens (FIFO).")
-
 ;; ---------------------------------------------------------------------------
 ;; Socket discovery
 ;; ---------------------------------------------------------------------------
@@ -170,10 +167,6 @@ Coerces buffer to unibyte so aref always yields raw byte values 0-255."
      ((string= type "focus_view")
       (emskin--on-focus-view (gethash "window_id" msg)
                                  (gethash "view_id" msg)))
-     ((string= type "activation_token")
-      (when emskin--pending-activations
-        (let ((cb (pop emskin--pending-activations)))
-          (funcall cb (gethash "token" msg "")))))
      ((string= type "surface_size")
       (let* ((h (gethash "height" msg))
              (offset (max 0 (- h (frame-pixel-height)))))
@@ -241,13 +234,22 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
             (buffer-list)))
 
 (defun emskin--on-window-destroyed (window-id)
-  "Kill the EAF buffer associated with WINDOW-ID."
+  "Close the Emacs window/buffer for WINDOW-ID and restore focus."
   (when-let ((buf (emskin--find-buffer window-id)))
     ;; Clear window-id first to prevent kill-buffer-hook from sending
     ;; a redundant "close" message back to the compositor.
     (with-current-buffer buf
       (setq-local emskin--window-id nil))
-    (kill-buffer buf)
+    (let ((win (get-buffer-window buf t)))
+      (when (and win (cdr (window-list nil 'no-minibuf)))
+        (delete-window win))
+      (kill-buffer buf))
+    ;; After window/buffer removal, check if the now-selected buffer is
+    ;; an emskin app and send set_focus so the compositor matches.
+    (let ((next-wid (buffer-local-value 'emskin--window-id
+                                        (window-buffer (selected-window)))))
+      (emskin--send `((type . "set_focus")
+                      (window_id . ,(or next-wid :json-null)))))
     (message "emskin: window %s destroyed" window-id)))
 
 (defun emskin--on-title-changed (window-id title)
@@ -656,45 +658,24 @@ otherwise focus Emacs.  Skips IPC when focus hasn't changed."
   :type 'directory
   :group 'emskin)
 
-(defun emskin--process-env-with-token (token)
-  "Build process-environment with XDG_ACTIVATION_TOKEN."
-  (if token
-      (cons (format "XDG_ACTIVATION_TOKEN=%s" token) process-environment)
-    process-environment))
-
-(defun emskin--launch-with-token (callback)
-  "Request an activation token, then call CALLBACK with the token string.
-CALLBACK receives the token string (or nil if unavailable)."
-  (if (not emskin--process)
-      (funcall callback nil)
-    (setq emskin--pending-activations
-          (append emskin--pending-activations (list callback)))
-    (emskin--send '((type . "request_activation_token")))))
-
 (defun emskin-open-app (app-name)
   "Launch embedded application APP-NAME (Python script in `emskin-demo-dir')."
   (interactive "sApp name: ")
   (let ((script (expand-file-name (format "%s.py" app-name) emskin-demo-dir)))
     (unless (file-exists-p script)
       (error "EAF script not found: %s" script))
-    (emskin--launch-with-token
-     (lambda (token)
-       (let ((process-environment (emskin--process-env-with-token token)))
-         (start-process (format "emskin-%s" app-name) nil "python3" script)
-         (message "emskin: launched %s" app-name))))))
+    (start-process (format "emskin-%s" app-name) nil "python3" script)
+    (message "emskin: launched %s" app-name)))
 
 (defun emskin-open-native-app (command)
   "Launch a native Wayland application inside emskin.
 COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
   (interactive "sCommand: ")
   (let ((args (split-string-and-unquote command)))
-    (emskin--launch-with-token
-     (lambda (token)
-       (let ((process-environment (emskin--process-env-with-token token)))
-         (apply #'start-process
-                (format "emskin-%s" (car args))
-                nil args)
-         (message "emskin: launched native app: %s" command))))))
+    (apply #'start-process
+           (format "emskin-%s" (car args))
+           nil args)
+    (message "emskin: launched native app: %s" command)))
 
 ;; ---------------------------------------------------------------------------
 ;; Auto-connect when running inside emskin

@@ -24,7 +24,7 @@ emskin 是一个嵌套 Wayland 合成器：在一个 winit 窗口内运行独立
 - **GPU 缓冲区共享** — linux-dmabuf 协议支持硬件加速客户端
 - **光标形状跟随** — 嵌入程序的光标形状自动转发到宿主窗口（链接显示手指、文本框显示 I-beam 等）。Wayland 客户端通过 wp_cursor_shape_v1，X11 客户端通过 XFixes cursor 追踪
 - **Popup 支持**（右键菜单、下拉框、补全浮层等）
-- **xdg_activation_v1 焦点转移**（启动新应用时自动获取焦点）
+- **自动焦点管理** — 新启动的应用自动获取焦点，关闭窗口后焦点自动回退
 - **通过 CLI 参数指定键盘布局**（`--xkb-layout` 等）
 
 > **推荐使用 pgtk (pure GTK) 版本的 Emacs**（`--with-pgtk` 编译），体验最佳。GTK3 X11 版本通过 XWayland 支持，包括全屏、嵌入应用、剪贴板同步、光标形状跟随等核心功能，但窗口几何计算可能有偏差。
@@ -142,7 +142,7 @@ M-x emskin-open-native-app RET foot        — 启动 foot 终端
 M-x emskin-open-native-app RET mpv foo.mp4 — 启动 mpv 播放视频
 ```
 
-应用启动后会自动获取 xdg_activation 令牌和焦点，窗口位置由 Emacs 通过 IPC 控制。
+应用启动后会自动获取焦点，窗口位置由 Emacs 通过 IPC 控制。
 
 ## 项目结构
 
@@ -155,7 +155,7 @@ emskin/         Rust 嵌套 Wayland 合成器
     input.rs      键盘/鼠标输入处理
     clipboard.rs  剪贴板同步
     winit.rs      winit 窗口后端
-    handlers/     Wayland 协议处理 (xdg_shell, compositor, xdg_activation)
+    handlers/     Wayland 协议处理 (xdg_shell, compositor, xwayland)
     ipc/          IPC 通信 (长度前缀 JSON over Unix socket)
     grabs/        移动/调整大小 (预留)
 elisp/          Emacs IPC 客户端
@@ -166,9 +166,9 @@ demo/           演示应用
 
 Emacs 与合成器通过 Unix socket 通信，使用长度前缀 JSON 协议。
 
-**Emacs -> 合成器:** `set_geometry`, `close`, `set_visibility`, `forward_key`, `add_mirror`, `update_mirror_geometry`, `remove_mirror`, `promote_mirror`, `request_activation_token`
+**Emacs -> 合成器:** `set_geometry`, `close`, `set_visibility`, `prefix_done`, `set_focus`, `set_crosshair`, `add_mirror`, `update_mirror_geometry`, `remove_mirror`, `promote_mirror`
 
-**合成器 -> Emacs:** `connected`, `surface_size`, `window_created`, `window_destroyed`, `title_changed`, `focus_view`, `activation_token`, `xwayland_ready`
+**合成器 -> Emacs:** `connected`, `surface_size`, `window_created`, `window_destroyed`, `title_changed`, `focus_view`, `xwayland_ready`
 
 ## License
 

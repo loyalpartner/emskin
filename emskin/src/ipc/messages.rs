@@ -45,8 +45,6 @@ pub enum IncomingMessage {
         window_id: u64,
         view_id: u64,
     },
-    /// Request an xdg_activation token for launching a new app.
-    RequestActivationToken,
     /// Tell the compositor which surface should have keyboard focus.
     /// `window_id: None` means focus Emacs; `Some(id)` means focus that app.
     SetFocus {
@@ -115,10 +113,6 @@ pub enum OutgoingMessage {
     FocusView {
         window_id: u64,
         view_id: u64,
-    },
-    /// Response to RequestActivationToken — token string for XDG_ACTIVATION_TOKEN env var.
-    ActivationToken {
-        token: String,
     },
     /// XWayland is ready — Emacs can set DISPLAY=:<display> for X11 apps.
     XWaylandReady {

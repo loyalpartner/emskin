@@ -1,6 +1,5 @@
 mod compositor;
 mod dmabuf;
-mod xdg_activation;
 mod xdg_shell;
 mod xwayland;
 

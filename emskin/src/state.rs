@@ -26,7 +26,6 @@ use smithay::{
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
-        xdg_activation::XdgActivationState,
         xwayland_shell::XWaylandShellState,
     },
     xwayland::X11Wm,
@@ -74,7 +73,6 @@ pub struct EmskinState {
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
-    pub xdg_activation_state: XdgActivationState,
     pub xwayland_shell_state: XWaylandShellState,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dmabuf_state: DmabufState,
@@ -188,7 +186,6 @@ impl EmskinState {
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
-        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
         let text_input_manager_state =
@@ -236,7 +233,6 @@ impl EmskinState {
             fractional_scale_manager_state,
             viewporter_state,
             xdg_decoration_state,
-            xdg_activation_state,
             xwayland_shell_state,
             cursor_shape_manager_state,
             dmabuf_state,

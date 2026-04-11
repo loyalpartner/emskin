@@ -73,6 +73,9 @@ impl XdgShellHandler for EmskinState {
                 s.size = Some((1, 1).into());
             });
 
+            // Capture wl_surface before Window::new_wayland_window consumes it.
+            let wl_surface = Some(surface.wl_surface().clone());
+
             let window = Window::new_wayland_window(surface);
             // Map at 1×1 so on_commit() and initial configure work.
             self.space.map_element(window.clone(), (0, 0), false);
@@ -88,6 +91,17 @@ impl XdgShellHandler for EmskinState {
 
             self.ipc
                 .send(crate::ipc::OutgoingMessage::WindowCreated { window_id, title });
+
+            // Auto-focus: give keyboard focus to the new window and notify
+            // Emacs so it switches to the corresponding buffer.
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                let serial = SERIAL_COUNTER.next_serial();
+                keyboard.set_focus(self, wl_surface, serial);
+            }
+            self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
+                window_id,
+                view_id: 0,
+            });
         }
     }
 

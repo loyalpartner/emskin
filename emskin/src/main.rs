@@ -124,12 +124,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Clean up embedded app windows whose Wayland surface was destroyed.
-        for app in state.apps.drain_dead() {
-            state.space.unmap_elem(&app.window);
-            state.ipc.send(ipc::OutgoingMessage::WindowDestroyed {
-                window_id: app.window_id,
-            });
-            tracing::info!("embedded app window_id={} destroyed", app.window_id);
+        let dead = state.apps.drain_dead();
+        if !dead.is_empty() {
+            for app in &dead {
+                state.space.unmap_elem(&app.window);
+                state.ipc.send(ipc::OutgoingMessage::WindowDestroyed {
+                    window_id: app.window_id,
+                });
+                tracing::info!("embedded app window_id={} destroyed", app.window_id);
+            }
+            // Fall back to Emacs when focus is lost. Emacs will redirect
+            // focus to the appropriate app via set_focus IPC if needed.
+            if let Some(keyboard) = state.seat.get_keyboard() {
+                if keyboard.current_focus().is_none() {
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    keyboard.set_focus(state, state.emacs_surface.clone(), serial);
+                    tracing::debug!("focus returned to Emacs after window destroy");
+                }
+            }
         }
 
         // Dispatch incoming IPC messages from Emacs.
@@ -154,11 +166,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if has_clipboard_events {
             let _ = state.display_handle.flush_clients();
         }
-
-        // Evict activation tokens older than 30s to prevent unbounded growth.
-        state
-            .xdg_activation_state
-            .retain_tokens(|_, data| data.timestamp.elapsed().as_secs() < 30);
 
         // Force-commit pending geometries that have timed out (100ms).
         for (window_id, window, geo) in state
@@ -344,9 +351,6 @@ fn handle_ipc_message(state: &mut EmskinState, msg: ipc::IncomingMessage) {
         IncomingMessage::PromoteMirror { window_id, view_id } => {
             ipc_promote_mirror(state, window_id, view_id);
         }
-        IncomingMessage::RequestActivationToken => {
-            ipc_request_activation_token(state);
-        }
         IncomingMessage::SetFocus { window_id } => {
             ipc_set_focus(state, window_id);
         }
@@ -519,15 +523,6 @@ fn ipc_set_focus(state: &mut EmskinState, window_id: Option<u64>) {
     state.prefix_saved_focus = None;
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     keyboard.set_focus(state, target, serial);
-}
-
-fn ipc_request_activation_token(state: &mut EmskinState) {
-    let (token, _data) = state.xdg_activation_state.create_external_token(None);
-    let token_str = token.to_string();
-    tracing::debug!("IPC request_activation_token: {token_str}");
-    state
-        .ipc
-        .send(ipc::OutgoingMessage::ActivationToken { token: token_str });
 }
 
 fn ipc_promote_mirror(state: &mut EmskinState, window_id: u64, view_id: u64) {

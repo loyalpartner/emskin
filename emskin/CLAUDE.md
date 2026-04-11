@@ -8,10 +8,13 @@
 ## Architecture
 - Nested Wayland compositor using smithay, hosting Emacs inside a winit window
 - First toplevel = Emacs (fullscreen), subsequent toplevels = **arbitrary embedded programs** (any Wayland or XWayland client) managed by AppManager. Not limited to EAF — any GTK/Qt/Electron/X11 app can be embedded as a child window whose geometry is controlled by Emacs via IPC.
-- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror, request_activation_token. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, activation_token, xwayland_ready
+- IPC protocol: length-prefixed JSON over Unix socket. Emacs→compositor: set_geometry, close, set_visibility, prefix_done, set_focus, set_crosshair, add_mirror, update_mirror_geometry, remove_mirror, promote_mirror. Compositor→Emacs: connected, surface_size, window_created, window_destroyed, title_changed, focus_view, xwayland_ready
 - Elisp client: `elisp/emskin.el` — auto-connects via parent PID socket discovery, syncs geometry on `window-size-change-functions` with change-detection guard
 - Mirror system: same embedded program displays in multiple Emacs windows. Source = first window (real surface), mirrors = subsequent windows (TextureRenderElement from same GPU texture). Elisp tracks source/mirror in `emskin--mirror-table`
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
+- Focus management: compositor auto-focuses new embedded toplevels in `new_toplevel` (no xdg_activation needed). On window destroy, compositor falls back to Emacs if `keyboard.current_focus().is_none()`; Emacs then redirects via `set_focus` IPC based on which buffer is now visible. No focus history stack in compositor — Emacs's buffer MRU order drives focus recovery
+- Embedded toplevel configure: `ipc_set_geometry` sets all four `TiledLeft/Right/Top/Bottom` states so terminal emulators (foot) fill the exact configured size with padding instead of rounding to cell boundaries
+- Window destroy (Elisp): `emskin--on-window-destroyed` does `delete-window` (if multi-window) then `kill-buffer`, then sends `set_focus` for `(window-buffer (selected-window))`. Use `window-buffer (selected-window)` not `current-buffer` after `kill-buffer` — the latter is unreliable
 - IME input: text_input_v3 bridges host IME (via winit Ime events) to embedded Wayland clients (Chrome). GTK/Qt apps use their own IM module (fcitx5-gtk via DBus) and are unaffected — `set_ime_allowed` is only enabled when the focused client has bound text_input_v3. Smithay patches required: expose `WinitEvent::Ime`, remove `has_instance()` guard in text_input dispatch, add `cursor_rectangle()` accessor
 - `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
 - X11 Emacs (gtk3 via XWayland): detected as first non-override-redirect X11 window in `map_window_request`. `emacs_x11_window: Option<Window>` stores the Window for resize and wl_surface polling. `initial_size_settled` guards `new_toplevel` to prevent Wayland embedded apps from being misidentified as Emacs
@@ -66,7 +69,7 @@
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)
-- xdg-decoration (force ServerSide — no decorations drawn)
+- xdg-decoration (force ServerSide — no decorations drawn). xdg_activation intentionally NOT implemented — focus is managed by compositor auto-focus + Emacs IPC
 - wl_seat (keyboard + pointer)
 - wl_data_device (DnD)
 - fractional_scale, viewporter
