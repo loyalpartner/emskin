@@ -25,7 +25,10 @@ use smithay::{
         wayland_server::{protocol::wl_surface::WlSurface, Resource},
     },
     utils::{Logical, Physical, Point, Rectangle, Size, Transform, SERIAL_COUNTER},
-    wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction},
+    wayland::{
+        compositor::{with_states, with_surface_tree_downward, TraversalAction},
+        seat::WaylandFocus,
+    },
 };
 
 use crate::EmskinState;
@@ -381,6 +384,20 @@ fn post_render(state: &mut EmskinState, output: &Output) {
 
     state.space.refresh();
     state.popups.cleanup();
+
+    // Poll for X11 Emacs wl_surface (XWayland associates it asynchronously).
+    if state.emacs_surface.is_none() {
+        if let Some(ref win) = state.emacs_x11_window {
+            if let Some(surface) = win.wl_surface().map(|s| s.into_owned()) {
+                tracing::info!("X11 Emacs wl_surface resolved");
+                state.emacs_surface = Some(surface);
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                if let Some(keyboard) = state.seat.get_keyboard() {
+                    keyboard.set_focus(state, state.emacs_surface.clone(), serial);
+                }
+            }
+        }
+    }
     if let Err(e) = state.display_handle.flush_clients() {
         tracing::warn!("flush_clients failed: {}", e);
     }
@@ -388,21 +405,29 @@ fn post_render(state: &mut EmskinState, output: &Output) {
 
 /// Resize only the Emacs toplevel; embedded app sizes come from Emacs via IPC.
 fn resize_emacs_surface(state: &mut EmskinState, logical: Size<i32, Logical>) {
-    let Some(ref emacs_surface) = state.emacs_surface else {
-        return;
-    };
-    for window in state.space.elements() {
-        let Some(toplevel) = window.toplevel() else {
-            continue;
-        };
-        if toplevel.wl_surface() != emacs_surface {
-            continue;
+    // Wayland (pgtk) path.
+    if let Some(ref emacs_surface) = state.emacs_surface {
+        for window in state.space.elements() {
+            let Some(toplevel) = window.toplevel() else {
+                continue;
+            };
+            if toplevel.wl_surface() == emacs_surface {
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(logical);
+                });
+                toplevel.send_pending_configure();
+                return;
+            }
         }
-        toplevel.with_pending_state(|s| {
-            s.size = Some(logical);
-        });
-        toplevel.send_pending_configure();
-        return;
+    }
+    // X11 Emacs path — configure the X11 window directly.
+    if let Some(ref win) = state.emacs_x11_window {
+        if let Some(x11) = win.x11_surface() {
+            let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
+            if let Err(e) = x11.configure(geo) {
+                tracing::warn!("X11 Emacs resize failed: {e}");
+            }
+        }
     }
 }
 

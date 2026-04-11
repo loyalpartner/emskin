@@ -14,7 +14,7 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
@@ -83,6 +83,10 @@ pub struct EmskinState {
     // --- emskin specific ---
     /// The Emacs surface (first toplevel to connect)
     pub emacs_surface: Option<WlSurface>,
+
+    /// X11 Emacs window — kept to poll for wl_surface after map (XWayland
+    /// associates the surface asynchronously via xwayland_shell protocol).
+    pub emacs_x11_window: Option<Window>,
 
     /// Whether the initial size has been configured.
     /// Set to true once Emacs receives the host window size in its first configure.
@@ -230,6 +234,7 @@ impl EmskinState {
 
             // emskin specific
             emacs_surface: None,
+            emacs_x11_window: None,
             initial_size_settled: false,
             emacs_child: None,
             elisp_dir: None,
@@ -291,6 +296,15 @@ impl EmskinState {
             .map_err(|e| format!("failed to init display event source: {e}"))?;
 
         Ok(socket_name)
+    }
+
+    /// Fullscreen geometry for the primary output (logical pixels).
+    pub fn output_fullscreen_geo(&self) -> Option<Rectangle<i32, Logical>> {
+        let output = self.space.outputs().next()?;
+        let mode = output.current_mode()?;
+        let scale = output.current_scale().fractional_scale();
+        let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
+        Some(Rectangle::new((0, 0).into(), logical))
     }
 
     pub fn surface_under(

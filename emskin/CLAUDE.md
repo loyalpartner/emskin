@@ -14,6 +14,11 @@
 - Keyboard input: compositor detects Emacs prefix keys (C-x, C-c, M-x) via `input_intercept`, redirects focus to Emacs; `prefix_done` IPC restores focus. `set_focus` IPC for explicit focus control. Prefix state: `Option<Option<WlSurface>>` (outer None = inactive)
 - IME input: text_input_v3 bridges host IME (via winit Ime events) to embedded Wayland clients (Chrome). GTK/Qt apps use their own IM module (fcitx5-gtk via DBus) and are unaffected — `set_ime_allowed` is only enabled when the focused client has bound text_input_v3. Smithay patches required: expose `WinitEvent::Ime`, remove `has_instance()` guard in text_input dispatch, add `cursor_rectangle()` accessor
 - `AppWindow::wl_surface()` returns primary WlSurface (Wayland toplevel or X11 fallback)
+- X11 Emacs (gtk3 via XWayland): detected as first non-override-redirect X11 window in `map_window_request`. `emacs_x11_window: Option<Window>` stores the Window for resize and wl_surface polling. `initial_size_settled` guards `new_toplevel` to prevent Wayland embedded apps from being misidentified as Emacs
+- X11 Emacs wl_surface: XWayland associates wl_surface asynchronously — `window.wl_surface()` returns None at map time. Poll in `post_render` until resolved, then set `emacs_surface` and keyboard focus
+- X11 Emacs fullscreen: `X11Surface::configure(geo)` must be called both at map time AND in `configure_request` — GTK3 Emacs sends its own resize requests that must be overridden with `output_fullscreen_geo()`
+- Elisp auto-connect: `emskin-maybe-auto-connect` must NOT be gated on `(featurep 'pgtk)` — X11 Emacs also needs IPC connection. Gate only on socket file existence
+- `EmskinState::output_fullscreen_geo()` — shared helper for output→mode→scale→logical fullscreen geometry, used by xwayland handlers and resize logic
 - grabs/ directory is placeholder code for future move/resize support
 
 ## Key Gotchas

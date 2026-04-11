@@ -35,7 +35,41 @@ impl XwmHandler for EmskinState {
     }
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        window.set_mapped(true).unwrap();
+        if let Err(e) = window.set_mapped(true) {
+            tracing::warn!("X11 set_mapped(true) failed: {e}");
+            return;
+        }
+
+        if !self.initial_size_settled && !window.is_override_redirect() {
+            // First non-OR X11 window = Emacs (gtk3 via XWayland).
+            tracing::info!("Emacs X11 window connected: title={:?}", window.title());
+
+            if let Some(geo) = self.output_fullscreen_geo() {
+                if let Err(e) = window.configure(geo) {
+                    tracing::warn!("X11 Emacs configure failed: {e}");
+                }
+                self.ipc.send(crate::ipc::OutgoingMessage::SurfaceSize {
+                    width: geo.size.w,
+                    height: geo.size.h,
+                });
+            }
+
+            // wl_surface may not be available yet — XWayland associates it
+            // asynchronously. Store the Window and poll in the event loop.
+            self.emacs_surface = window.wl_surface();
+            let win = Window::new_x11_window(window);
+            self.space.map_element(win.clone(), (0, 0), false);
+            self.emacs_x11_window = Some(win);
+            self.initial_size_settled = true;
+
+            if self.emacs_surface.is_some() {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.set_focus(self, self.emacs_surface.clone(), serial);
+                }
+            }
+            return;
+        }
 
         let window_id = self.apps.alloc_id();
         let title = window.title();
@@ -101,6 +135,20 @@ impl XwmHandler for EmskinState {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
+        // Emacs X11 window must stay fullscreen — ignore client resize requests.
+        let is_emacs = self
+            .emacs_x11_window
+            .as_ref()
+            .is_some_and(|win| win.x11_surface() == Some(&window));
+        if is_emacs {
+            if let Some(geo) = self.output_fullscreen_geo() {
+                if let Err(e) = window.configure(geo) {
+                    tracing::warn!("X11 Emacs configure failed: {e}");
+                }
+            }
+            return;
+        }
+
         let mut geo = window.geometry();
         if let Some(w) = w {
             geo.size.w = w as i32;

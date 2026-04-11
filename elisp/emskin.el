@@ -703,10 +703,9 @@ COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
 (defun emskin-maybe-auto-connect ()
   "Connect to emskin IPC if we appear to be running inside emskin.
 Checks for the emskin-specific socket file derived from our parent PID."
-  (when (featurep 'pgtk)
-    (let ((path (emskin--ipc-path)))
-      (when (file-exists-p path)
-        (run-with-timer 0.5 nil #'emskin-connect)))))
+  (let ((path (emskin--ipc-path)))
+    (when (file-exists-p path)
+      (run-with-timer 0.5 nil #'emskin-connect))))
 
 ;; Hook into Emacs startup.
 (add-hook 'emacs-startup-hook #'emskin-maybe-auto-connect)

@@ -27,13 +27,13 @@ emskin 是一个嵌套 Wayland 合成器：在一个 winit 窗口内运行独立
 - **xdg_activation_v1 焦点转移**（启动新应用时自动获取焦点）
 - **通过 CLI 参数指定键盘布局**（`--xkb-layout` 等）
 
-> **注意：** 目前仅适配了 pgtk (pure GTK) 版本的 Emacs。GTK3 X11 版本尚未适配，窗口几何计算会有偏差。推荐使用 `emacs --with-pgtk` 编译的版本。
+> **推荐使用 pgtk (pure GTK) 版本的 Emacs**（`--with-pgtk` 编译），体验最佳。GTK3 X11 版本通过 XWayland 支持，基本功能可用，但窗口几何计算可能有偏差。
 
 ## 依赖
 
 - Rust 1.70+
 - Wayland 开发库
-- Emacs（pgtk 版本）
+- Emacs（推荐 pgtk 版本，GTK3 X11 版本亦可通过 XWayland 运行）
 - [smithay](https://github.com/loyalpartner/smithay)（fork，自动从 Git 拉取）
 
 Arch Linux:
