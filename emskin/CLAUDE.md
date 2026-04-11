@@ -66,6 +66,10 @@
 - Clipboard startup guard: use `!self.ipc.is_connected()` instead of per-target bool flags — GTK clipboard init happens before emskin.el connects, real user copies happen after. Works for both pgtk (SelectionHandler) and gtk3 (XwmHandler) paths
 - X11 cursor tracking: `cursor_x11.rs` opens an independent X11 connection (explicit `:{display}`, NOT `DISPLAY` env var) to XWayland, subscribes to XFixes `CursorNotifyMask::DISPLAY_CURSOR` on root window, maps cursor name atoms to `CursorIcon` via `get_atom_name`. Dispatched in `post_render` via `poll_for_event` (non-blocking). `broken` flag stops polling after connection error. Requires XFixes v2+
 - X11 cursor: `SeatHandler::cursor_image` is NEVER called for X11 clients — XWayland doesn't forward X11 cursor changes via `wl_pointer.set_cursor`. Must use XFixes cursor tracking instead
+- Layer shell (wlr-layer-shell): uses smithay's `LayerMap` + `DesktopLayerSurface` (not manual Vec). `layer_map_for_output` returns MutexGuard — collect data and drop guard before calling renderer or keyboard.set_focus. Frame callbacks: collect layers, drop guard, then send_frame
+- Layer shell keyboard focus timing: `new_layer_surface` fires on `get_layer_surface` (BEFORE initial commit) — cached_state has no keyboard_interactivity yet. Must defer focus to compositor commit handler where `can_receive_keyboard_focus()` works correctly
+- Layer shell destroy: only reclaim focus if `keyboard.current_focus() == destroyed surface` — unconditional fallback steals focus from other active windows
+- Code language: all comments, tracing logs, and doc comments must be in English. No Chinese in Rust source code
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)
@@ -76,3 +80,4 @@
 - text_input_v3 (IME bridge to host — see smithay fork patches)
 - wp_cursor_shape_v1 (cursor shape forwarding to host — Named icons via winit, Surface falls back to default)
 - linux-dmabuf (GPU buffer sharing for hardware-accelerated clients)
+- wlr-layer-shell (layer surfaces for rofi/wofi launchers — uses LayerMap for layout, keyboard focus set on first commit not on surface creation)

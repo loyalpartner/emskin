@@ -22,7 +22,10 @@ use smithay::{
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
-        shell::xdg::{decoration::XdgDecorationState, XdgShellState},
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{decoration::XdgDecorationState, XdgShellState},
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
@@ -73,6 +76,7 @@ pub struct EmskinState {
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub viewporter_state: ViewporterState,
     pub xdg_decoration_state: XdgDecorationState,
+    pub layer_shell_state: WlrLayerShellState,
     pub xwayland_shell_state: XWaylandShellState,
     pub cursor_shape_manager_state: CursorShapeManagerState,
     pub dmabuf_state: DmabufState,
@@ -186,6 +190,7 @@ impl EmskinState {
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
         let text_input_manager_state =
@@ -233,6 +238,7 @@ impl EmskinState {
             fractional_scale_manager_state,
             viewporter_state,
             xdg_decoration_state,
+            layer_shell_state,
             xwayland_shell_state,
             cursor_shape_manager_state,
             dmabuf_state,
@@ -361,7 +367,12 @@ impl EmskinState {
             }
         }
 
-        // 2. Check real surfaces in the space.
+        // 2. Layer surfaces take priority over space (launchers must intercept input).
+        if let Some(hit) = self.layer_surface_under(pos) {
+            return Some(hit);
+        }
+
+        // 3. Space elements.
         self.space
             .element_under(pos)
             .and_then(|(window, location)| {
@@ -369,6 +380,33 @@ impl EmskinState {
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(s, p)| (s, (p + location).to_f64()))
             })
+    }
+
+    fn layer_surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        use smithay::desktop::layer_map_for_output;
+        use smithay::wayland::shell::wlr_layer::Layer;
+
+        let output = self.space.outputs().next()?;
+        let map = layer_map_for_output(output);
+
+        for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
+            if let Some(surface) = map.layer_under(layer, pos) {
+                let Some(layer_geo) = map.layer_geometry(surface) else {
+                    continue;
+                };
+                let local = pos - layer_geo.loc.to_f64();
+                if let Some((wl_surface, offset)) =
+                    surface.surface_under(local, WindowSurfaceType::ALL)
+                {
+                    return Some((wl_surface, (offset + layer_geo.loc).to_f64()));
+                }
+            }
+        }
+
+        None
     }
 }
 

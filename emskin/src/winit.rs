@@ -6,12 +6,16 @@ use smithay::{
         renderer::{
             damage::OutputDamageTracker,
             element::{
-                memory::MemoryRenderBufferRenderElement, render_elements,
-                solid::SolidColorRenderElement, texture::TextureRenderElement, Id, Kind,
+                memory::MemoryRenderBufferRenderElement,
+                render_elements,
+                solid::SolidColorRenderElement,
+                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                texture::TextureRenderElement,
+                Id, Kind,
             },
             gles::{GlesRenderer, GlesTexture},
             utils::{import_surface_tree, RendererSurfaceStateUserData},
-            ImportMem, Renderer,
+            ImportAll, ImportMem, Renderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -35,11 +39,12 @@ use crate::EmskinState;
 
 /// Blanket trait bundling renderer constraints for the `render_elements!` macro
 /// (which cannot parse associated-type bounds like `Renderer<TextureId = GlesTexture>`).
-trait EmskinRenderer: ImportMem + Renderer<TextureId = GlesTexture> {}
-impl<R: ImportMem + Renderer<TextureId = GlesTexture>> EmskinRenderer for R {}
+trait EmskinRenderer: ImportAll + ImportMem + Renderer<TextureId = GlesTexture> {}
+impl<R: ImportAll + ImportMem + Renderer<TextureId = GlesTexture>> EmskinRenderer for R {}
 
 render_elements! {
     pub CustomElement<R> where R: EmskinRenderer;
+    Surface=WaylandSurfaceRenderElement<R>,
     Mirror=TextureRenderElement<GlesTexture>,
     Solid=SolidColorRenderElement,
     Label=MemoryRenderBufferRenderElement<R>,
@@ -241,6 +246,48 @@ fn build_mirror_elements(
     elements
 }
 
+fn build_layer_surface_elements(
+    renderer: &mut GlesRenderer,
+    output: &Output,
+    scale: f64,
+) -> Vec<CustomElement<GlesRenderer>> {
+    use smithay::desktop::layer_map_for_output;
+    use smithay::wayland::shell::wlr_layer::Layer;
+
+    // Collect surface + location while holding the LayerMap guard,
+    // then drop the guard before calling the renderer (avoids holding
+    // a MutexGuard across GL operations).
+    let surface_locs: Vec<_> = {
+        let map = layer_map_for_output(output);
+        [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background]
+            .iter()
+            .flat_map(|&layer| {
+                map.layers_on(layer)
+                    .rev()
+                    .map(|s| {
+                        let loc = map.layer_geometry(s).map(|g| g.loc).unwrap_or_default();
+                        (s.wl_surface().clone(), loc)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    let mut elements = Vec::new();
+    for (wl_surface, loc) in &surface_locs {
+        let layer_elements: Vec<CustomElement<GlesRenderer>> = render_elements_from_surface_tree(
+            renderer,
+            wl_surface,
+            loc.to_physical_precise_round(scale),
+            scale,
+            1.0,
+            Kind::Unspecified,
+        );
+        elements.extend(layer_elements);
+    }
+    elements
+}
+
 fn render_frame(
     state: &mut EmskinState,
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
@@ -264,10 +311,11 @@ fn render_frame(
         // smithay's damage tracker renders elements via
         // `render_elements.iter().rev()`, so **the first element in the vec
         // is the topmost layer**. Layer order (top → bottom):
-        //   1. Skeleton labels  (text on top of everything, per user request)
-        //   2. Skeleton borders
-        //   3. Crosshair label + lines
-        //   4. Mirror texture elements (popups → toplevel)
+        //   1. Software cursor
+        //   2. Skeleton labels / borders (debug overlay)
+        //   3. Crosshair label + lines (debug overlay)
+        //   4. Layer shell surfaces (Overlay → Top → Bottom → Background)
+        //   5. Mirror texture elements (popups → toplevel)
         let scale = output.current_scale().fractional_scale();
         let mut custom_elements: Vec<CustomElement<GlesRenderer>> = Vec::new();
 
@@ -333,7 +381,7 @@ fn render_frame(
             custom_elements.push(s.into());
         }
 
-        // Crosshair: above mirrors, below skeleton.
+        // Crosshair: above layer surfaces, below skeleton.
         if let Some(pointer) = state.seat.get_pointer() {
             let cursor = pointer.current_location();
             let (solids, label) = state
@@ -346,6 +394,9 @@ fn render_frame(
                 custom_elements.push(s.into());
             }
         }
+
+        // Layer surfaces: above mirrors, below debug overlays.
+        custom_elements.extend(build_layer_surface_elements(renderer, output, scale));
 
         // Mirrors: bottom of the custom layer stack.
         custom_elements.extend(build_mirror_elements(state, renderer, scale));
@@ -381,6 +432,21 @@ fn post_render(state: &mut EmskinState, output: &Output) {
             |_, _| Some(output.clone()),
         )
     });
+
+    // Layer surfaces: send frame callbacks and clean up dead ones.
+    {
+        use smithay::desktop::layer_map_for_output;
+        let mut map = layer_map_for_output(output);
+        let layers: Vec<_> = map.layers().cloned().collect();
+        map.cleanup();
+        drop(map);
+        let elapsed = state.start_time.elapsed();
+        for layer in &layers {
+            layer.send_frame(output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
 
     state.space.refresh();
     state.popups.cleanup();

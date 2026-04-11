@@ -3,6 +3,7 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
+    desktop::{layer_map_for_output, WindowSurfaceType},
     reexports::wayland_server::{
         protocol::{wl_buffer, wl_surface::WlSurface},
         Client,
@@ -64,6 +65,41 @@ impl CompositorHandler for EmskinState {
                 tracing::debug!("embedded app window_id={window_id} geometry committed: {geo:?}");
             }
         };
+
+        // Layer surface commit: re-arrange and send pending configure.
+        // Keyboard focus is set here (not in new_layer_surface) because
+        // cached_state only has keyboard_interactivity after initial commit.
+        let layer_focus = if let Some(output) = self.space.outputs().next().cloned() {
+            let mut map = layer_map_for_output(&output);
+            let layer = map
+                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .cloned();
+            if let Some(ref layer) = layer {
+                map.arrange();
+                drop(map);
+                layer.layer_surface().send_pending_configure();
+
+                let needs_focus = layer.can_receive_keyboard_focus();
+                let wl = layer.wl_surface().clone();
+                Some((needs_focus, wl))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((needs_focus, wl)) = layer_focus {
+            if needs_focus {
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    if keyboard.current_focus().as_ref() != Some(&wl) {
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        keyboard.set_focus(self, Some(wl), serial);
+                        tracing::debug!("layer surface received keyboard focus");
+                    }
+                }
+            }
+            return;
+        }
 
         xdg_shell::handle_surface_commit(&mut self.popups, &self.space, surface);
     }
