@@ -219,11 +219,22 @@ impl XdgShellHandler for EmskinState {
             tracing::info!("Emacs requested fullscreen");
             self.pending_fullscreen = Some(true);
             Self::set_toplevel_state(&surface, xdg_toplevel::State::Fullscreen, true);
+        } else if self.apps.id_for_surface(surface.wl_surface()).is_some() {
+            // Embedded app fullscreen: set state so the client hides its
+            // toolbar/chrome, but keep the window sized to its Emacs buffer.
+            Self::set_toplevel_state(&surface, xdg_toplevel::State::Fullscreen, true);
+            tracing::debug!("embedded app fullscreen request acknowledged");
         }
     }
 
-    fn unfullscreen_request(&mut self, _surface: ToplevelSurface) {
-        // Emacs always fills the compositor window — ignore unfullscreen
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if self.is_any_emacs_surface(surface.wl_surface()) {
+            return;
+        }
+        if self.apps.id_for_surface(surface.wl_surface()).is_some() {
+            Self::set_toplevel_state(&surface, xdg_toplevel::State::Fullscreen, false);
+            tracing::debug!("embedded app unfullscreen request acknowledged");
+        }
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
