@@ -148,12 +148,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "$AUR_SSH_KEY" > ~/.ssh/aur
           chmod 600 ~/.ssh/aur
-          cat > ~/.ssh/config << 'EOF'
-          Host aur.archlinux.org
-            IdentityFile ~/.ssh/aur
-            StrictHostKeyChecking no
-          EOF
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          echo -e "Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur" > ~/.ssh/config
 
+          ssh -T aur@aur.archlinux.org || true
           git clone ssh://aur@aur.archlinux.org/emskin-bin.git aur-repo
           cp PKGBUILD .SRCINFO aur-repo/
           cd aur-repo
