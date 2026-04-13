@@ -2,6 +2,10 @@
 name = "emskin"
 version = "0.1.0"
 edition = "2021"
+authors = ["Lee <loyalpartner@163.com>"]
+description = "Nested Wayland compositor for Emacs"
+license = "GPL-3.0"
+repository = "https://github.com/emskin/emskin"
 
 [dependencies]
 tracing = "0.1"
