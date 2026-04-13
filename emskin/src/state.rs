@@ -199,6 +199,11 @@ pub struct EmskinState {
     pub cursor_status: CursorImageStatus,
     /// Set when cursor_status changes; consumed by apply_pending_state.
     pub cursor_changed: bool,
+
+    /// Coarse damage flag for structural events (IPC, layer shell, input,
+    /// workspace switch) that smithay's per-element OutputDamageTracker does
+    /// not cover.  When true the next Redraw calls render_frame; cleared after.
+    pub needs_redraw: bool,
 }
 
 impl EmskinState {
@@ -314,6 +319,7 @@ impl EmskinState {
             pending_ime_allowed: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_changed: false,
+            needs_redraw: true,
         })
     }
 
@@ -353,6 +359,7 @@ impl EmskinState {
                     // Flush responses immediately so clients don't wait until
                     // the next render frame for roundtrip replies (wl_display.sync).
                     let _ = state.display_handle.flush_clients();
+                    state.needs_redraw = true;
                     Ok(PostAction::Continue)
                 },
             )

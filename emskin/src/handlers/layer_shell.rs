@@ -35,9 +35,7 @@ impl WlrLayerShellHandler for EmskinState {
             return;
         }
 
-        tracing::info!(
-            "layer_shell: new surface, namespace={namespace}",
-        );
+        tracing::info!("layer_shell: new surface, namespace={namespace}",);
 
         // map_layer() internally calls arrange() which uses cached_state.
         // At this point cached_state has defaults (no anchors, 0×0), so
@@ -64,6 +62,7 @@ impl WlrLayerShellHandler for EmskinState {
         });
         desktop_layer.layer_surface().send_pending_configure();
         drop(map);
+        self.needs_redraw = true;
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
@@ -79,6 +78,7 @@ impl WlrLayerShellHandler for EmskinState {
         }
 
         tracing::info!("layer_shell: surface destroyed");
+        self.needs_redraw = true;
 
         // Only reclaim focus if this surface actually held it.
         if let Some(keyboard) = self.seat.get_keyboard() {

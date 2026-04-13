@@ -44,6 +44,7 @@ impl SeatHandler for EmskinState {
     ) {
         self.cursor_status = image;
         self.cursor_changed = true;
+        self.needs_redraw = true;
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {

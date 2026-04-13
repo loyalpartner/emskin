@@ -142,6 +142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // After dispatch_clients, set_parent has been processed for same-batch
         // toplevels, so surface.parent() is now accurate.
         let pending = std::mem::take(&mut state.pending_emacs_toplevels);
+        if !pending.is_empty() {
+            state.needs_redraw = true;
+        }
         for (surface, window) in pending {
             if surface.parent().is_some() {
                 // Child frame (posframe, etc.) — leave in current space, GTK manages.
@@ -204,7 +207,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // --- Workspace: process ext-workspace-v1 client actions ---
-        for action in state.workspace_protocol.take_pending_actions() {
+        let actions = state.workspace_protocol.take_pending_actions();
+        if !actions.is_empty() {
+            state.needs_redraw = true;
+        }
+        for action in actions {
             use crate::protocols::workspace::WorkspaceAction;
             match action {
                 WorkspaceAction::Activate(id) => {
@@ -244,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if had_dead {
             // Bar might have disappeared (2→1 workspace) — resize Emacs back to fullscreen.
             resize_all_emacs_for_bar(state);
+            state.needs_redraw = true;
         }
 
         // --- Workspace: detect active Emacs frame death ---
@@ -256,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.ipc.send(ipc::OutgoingMessage::WorkspaceSwitched {
                     workspace_id: fallback_id,
                 });
+                state.needs_redraw = true;
             } else {
                 tracing::info!("last Emacs frame died, stopping");
                 state.loop_signal.stop();
@@ -315,6 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Route unmap to the correct workspace's space.
         let dead = state.apps.drain_dead();
         if !dead.is_empty() {
+            state.needs_redraw = true;
             for app in &dead {
                 if let Some(space) = state.space_for_workspace_mut(app.workspace_id) {
                     space.unmap_elem(&app.window);
@@ -339,6 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for msg in msgs {
                 handle_ipc_message(state, msg);
             }
+            state.needs_redraw = true;
         }
 
         // Process clipboard events from host compositor.
@@ -355,13 +366,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // requests without waiting for the next render frame.
         if has_clipboard_events {
             let _ = state.display_handle.flush_clients();
+            state.needs_redraw = true;
         }
 
         // Force-commit pending geometries that have timed out (100ms).
-        for (window_id, window, geo) in state
+        let timed_out = state
             .apps
-            .collect_timed_out(std::time::Duration::from_millis(100))
-        {
+            .collect_timed_out(std::time::Duration::from_millis(100));
+        if !timed_out.is_empty() {
+            state.needs_redraw = true;
+        }
+        for (window_id, window, geo) in timed_out {
             let ws_id = state
                 .apps
                 .get(window_id)

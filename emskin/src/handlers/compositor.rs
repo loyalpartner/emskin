@@ -115,7 +115,7 @@ impl CompositorHandler for EmskinState {
         let is_space_element = self
             .space
             .elements()
-            .any(|w| w.wl_surface().map_or(false, |s| *s == *surface));
+            .any(|w| w.wl_surface().is_some_and(|s| *s == *surface));
         if !is_space_element {
             tracing::trace!("untracked surface commit: {surface:?}");
             if let Some(output) = self.space.outputs().next() {

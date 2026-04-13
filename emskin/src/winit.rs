@@ -489,6 +489,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
         if let Some(icon) = tracker.take_pending() {
             state.cursor_status = smithay::input::pointer::CursorImageStatus::Named(icon);
             state.cursor_changed = true;
+            state.needs_redraw = true;
         }
     }
 
@@ -586,13 +587,20 @@ pub fn init_winit(
                             );
                         }
                     }
+                    state.needs_redraw = true;
                 }
 
-                WinitEvent::Input(event) => state.process_input_event(event),
+                WinitEvent::Input(event) => {
+                    state.process_input_event(event);
+                    state.needs_redraw = true;
+                }
 
                 WinitEvent::Redraw => {
                     apply_pending_state(state, &mut backend);
-                    render_frame(state, &mut backend, &output, &mut damage_tracker);
+                    if state.needs_redraw {
+                        render_frame(state, &mut backend, &output, &mut damage_tracker);
+                        state.needs_redraw = false;
+                    }
                     post_render(state, &output);
                     backend.window().request_redraw();
                 }
@@ -603,6 +611,7 @@ pub fn init_winit(
 
                 WinitEvent::Ime(ime) => {
                     handle_ime_event(state, ime, backend.window());
+                    state.needs_redraw = true;
                 }
 
                 WinitEvent::Focus(focused) => {
@@ -633,6 +642,7 @@ pub fn init_winit(
                             }
                         }
                     }
+                    state.needs_redraw = true;
                 }
             };
             state.backend = Some(backend);
