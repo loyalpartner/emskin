@@ -9,17 +9,12 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+    name: Build & Release
+    runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+    permissions:
+      contents: write
     steps:
       - name: Install base dependencies
         run: |
@@ -48,8 +43,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             emskin/target
-          key: arch-${{ matrix.arch }}-release-${{ hashFiles('emskin/Cargo.lock', 'emskin/Cargo.toml') }}
-          restore-keys: arch-${{ matrix.arch }}-release-
+          key: arch-x86_64-release-${{ hashFiles('emskin/Cargo.lock', 'emskin/Cargo.toml') }}
+          restore-keys: arch-x86_64-release-
 
       - name: Build release
         working-directory: emskin
@@ -67,13 +62,13 @@ jobs:
           staging=$(mktemp -d)
           cp emskin/target/release/emskin "$staging/"
           cp LICENSE "$staging/"
-          tar czf emskin-${{ steps.version.outputs.version }}-${{ matrix.arch }}.tar.gz -C "$staging" .
+          tar czf emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz -C "$staging" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: emskin-${{ matrix.arch }}
-          path: emskin-${{ steps.version.outputs.version }}-${{ matrix.arch }}.tar.gz
+          name: emskin-x86_64
+          path: emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
 
   release:
     name: Create Release
@@ -82,13 +77,87 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          merge-multiple: true
+          name: emskin-x86_64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: emskin-*.tar.gz
+
+  aur:
+    name: Publish to AUR
+    needs: release
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm && pacman -S --noconfirm --needed base-devel git openssh
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: emskin-x86_64
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PKGBUILD
+        run: |
+          SHA=$(sha256sum emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz | cut -d' ' -f1)
+          cat > PKGBUILD << EOF
+          # Maintainer: Lee <loyalpartner@163.com>
+          pkgname=emskin-bin
+          pkgver=${{ steps.version.outputs.version }}
+          pkgrel=1
+          pkgdesc="Nested Wayland compositor for Emacs"
+          url="https://github.com/emskin/emskin"
+          license=("GPL-3.0-only")
+          arch=("x86_64")
+          depends=("wayland" "libxkbcommon" "libxkbcommon-x11" "mesa" "libinput" "seatd" "fontconfig" "freetype2" "xorg-xwayland")
+          provides=("emskin")
+          conflicts=("emskin")
+          source=("\${url}/releases/download/v\${pkgver}/emskin-\${pkgver}-x86_64.tar.gz")
+          sha256sums=("${SHA}")
+
+          package() {
+              install -Dm755 emskin -t "\$pkgdir/usr/bin"
+              install -Dm644 LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+          }
+          EOF
+          sed -i 's/^          //' PKGBUILD
+
+      - name: Generate .SRCINFO
+        run: |
+          useradd -m builder
+          chown builder:builder PKGBUILD
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+
+      - name: Push to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          cat > ~/.ssh/config << 'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            StrictHostKeyChecking no
+          EOF
+
+          git clone ssh://aur@aur.archlinux.org/emskin-bin.git aur-repo
+          cp PKGBUILD .SRCINFO aur-repo/
+          cd aur-repo
+          git config user.name "Lee"
+          git config user.email "loyalpartner@163.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet || {
+            git commit -m "Update to v${{ steps.version.outputs.version }}"
+            git push origin master
+          }
