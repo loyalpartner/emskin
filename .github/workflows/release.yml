@@ -8,50 +8,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build & Release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    container:
+      image: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
+      - name: Install base dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libudev-dev \
-            libinput-dev \
-            libgbm-dev \
-            libseat-dev \
-            libpixman-1-dev \
-            libssl-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxcb-composite0-dev \
-            libxcb-xfixes0-dev \
-            libxcb-xinput-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-dri3-dev \
-            libxcb-present-dev \
-            libxcb-sync-dev \
-            libxcb-randr0-dev \
-            libxcb-shm0-dev \
-            libxcb-xkb-dev \
-            libxcb-dpms0-dev \
-            libxcb-res0-dev \
-            libxcb-cursor-dev \
-            libxcb-icccm4-dev \
-            libxkbcommon-x11-dev \
-            libfontconfig1-dev \
-            libfreetype-dev
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            base-devel git rustup \
+            wayland wayland-protocols \
+            libxkbcommon libxkbcommon-x11 \
+            libinput seatd mesa \
+            libx11 libxcb xcb-util-cursor \
+            fontconfig freetype2 \
+            xorg-xwayland
+
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         working-directory: emskin
-        run: rustup show
+        run: |
+          rustup default stable
+          rustup show
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -60,8 +48,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             emskin/target
-          key: ${{ runner.os }}-release-${{ hashFiles('emskin/Cargo.lock', 'emskin/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-release-
+          key: arch-${{ matrix.arch }}-release-${{ hashFiles('emskin/Cargo.lock', 'emskin/Cargo.toml') }}
+          restore-keys: arch-${{ matrix.arch }}-release-
 
       - name: Build release
         working-directory: emskin
@@ -79,10 +67,28 @@ jobs:
           staging=$(mktemp -d)
           cp emskin/target/release/emskin "$staging/"
           cp LICENSE "$staging/"
-          tar czf emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz -C "$staging" .
+          tar czf emskin-${{ steps.version.outputs.version }}-${{ matrix.arch }}.tar.gz -C "$staging" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emskin-${{ matrix.arch }}
+          path: emskin-${{ steps.version.outputs.version }}-${{ matrix.arch }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
+          files: emskin-*.tar.gz
