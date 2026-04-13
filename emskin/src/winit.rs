@@ -316,12 +316,15 @@ fn render_frame(
         // `render_elements.iter().rev()`, so **the first element in the vec
         // is the topmost layer**. Layer order (top → bottom):
         //   1. Software cursor
-        //   2. Skeleton labels / borders (debug overlay)
-        //   3. Crosshair label + lines (debug overlay)
-        //   4. Layer shell surfaces (Overlay → Top → Bottom → Background)
-        //   5. Mirror texture elements (popups → toplevel)
+        //   2. Splash screen (startup banner — fades out when Emacs connects)
+        //   3. Workspace bar
+        //   4. Skeleton labels / borders (debug overlay)
+        //   5. Crosshair label + lines (debug overlay)
+        //   6. Layer shell surfaces (Overlay → Top → Bottom → Background)
+        //   7. Mirror texture elements (popups → toplevel)
         let scale = output.current_scale().fractional_scale();
         let mut custom_elements: Vec<CustomElement<GlesRenderer>> = Vec::new();
+        let output_size_log: Size<i32, Logical> = size.to_f64().to_logical(scale).to_i32_round();
 
         // Software cursor: topmost layer. Used for Surface cursors (GTK3/Emacs)
         // that can't be forwarded to the host via winit's CursorIcon API.
@@ -371,7 +374,22 @@ fn render_frame(
             }
         }
 
-        let output_size_log: Size<i32, Logical> = size.to_f64().to_logical(scale).to_i32_round();
+        // Splash screen: above all compositor content, below cursor.
+        if !state.splash.is_done() {
+            if state.emacs_surface.is_some() {
+                state.splash.dismiss();
+            }
+            let (splash_solids, splash_labels) =
+                state
+                    .splash
+                    .build_elements(renderer, output_size_log, scale);
+            for l in splash_labels {
+                custom_elements.push(l.into());
+            }
+            for s in splash_solids {
+                custom_elements.push(s.into());
+            }
+        }
 
         // Workspace bar: absolute topmost layer (above skeleton).
         if state.bar_enabled && state.workspace_bar.visible() {
@@ -597,6 +615,10 @@ pub fn init_winit(
 
                 WinitEvent::Redraw => {
                     apply_pending_state(state, &mut backend);
+                    // Keep rendering every frame during splash animation.
+                    if !state.splash.is_done() {
+                        state.needs_redraw = true;
+                    }
                     if state.needs_redraw {
                         render_frame(state, &mut backend, &output, &mut damage_tracker);
                         state.needs_redraw = false;

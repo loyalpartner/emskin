@@ -5,9 +5,7 @@
 //! Active button = Catppuccin Blue pill + dark text.
 //! Inactive button = gray text only.
 
-use cosmic_text::{
-    Attrs, Buffer as CtBuffer, Color as CtColor, Family, FontSystem, Metrics, Shaping, SwashCache,
-};
+use cosmic_text::{Attrs, Buffer as CtBuffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -437,59 +435,7 @@ fn render_text_label(
     (buf_w, buf_h)
 }
 
-/// Alpha-blend text glyphs onto existing pixel data.
-#[allow(clippy::too_many_arguments)] // cosmic_text requires font_system + swash_cache as separate &mut refs
-fn draw_text_onto(
-    data: &mut [u8],
-    buf_w: i32,
-    buf_h: i32,
-    offset_x: i32,
-    offset_y: i32,
-    fg: &[u8; 4],
-    ct_buffer: &mut CtBuffer,
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-) {
-    let stride = buf_w * 4;
-    let ct_color = CtColor::rgba(fg[2], fg[1], fg[0], fg[3]);
-    ct_buffer.draw(
-        font_system,
-        swash_cache,
-        ct_color,
-        |gx, gy, gw, gh, color| {
-            let alpha = color.a() as u32;
-            if alpha == 0 {
-                return;
-            }
-            let px_r = color.r() as u32;
-            let px_g = color.g() as u32;
-            let px_b = color.b() as u32;
-
-            for dy in 0..gh as i32 {
-                for dx in 0..gw as i32 {
-                    let x = gx + dx + offset_x;
-                    let y = gy + dy + offset_y;
-                    if x < 0 || x >= buf_w || y < 0 || y >= buf_h {
-                        continue;
-                    }
-                    let off = (y * stride + x * 4) as usize;
-                    if off + 3 >= data.len() {
-                        continue;
-                    }
-                    let inv = 255 - alpha;
-                    let db = data[off] as u32;
-                    let dg = data[off + 1] as u32;
-                    let dr = data[off + 2] as u32;
-                    let da = data[off + 3] as u32;
-                    data[off] = ((db * inv + px_b * alpha) / 255) as u8;
-                    data[off + 1] = ((dg * inv + px_g * alpha) / 255) as u8;
-                    data[off + 2] = ((dr * inv + px_r * alpha) / 255) as u8;
-                    data[off + 3] = ((da * inv + 255 * alpha) / 255).min(255) as u8;
-                }
-            }
-        },
-    );
-}
+use crate::utils::draw_text_onto;
 
 /// Draw a filled rounded rectangle with anti-aliased edges into BGRA pixel data.
 fn draw_rounded_rect(data: &mut [u8], w: i32, h: i32, radius: f32, color: &[u8; 4]) {

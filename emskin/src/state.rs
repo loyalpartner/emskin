@@ -208,6 +208,9 @@ pub struct EmskinState {
     /// workspace switch) that smithay's per-element OutputDamageTracker does
     /// not cover.  When true the next Redraw calls render_frame; cleared after.
     pub needs_redraw: bool,
+
+    /// Startup splash screen (logo + animation), dismissed on Emacs connect.
+    pub splash: crate::splash::SplashScreen,
 }
 
 impl EmskinState {
@@ -325,6 +328,7 @@ impl EmskinState {
             cursor_changed: false,
             layer_saved_focus: None,
             needs_redraw: true,
+            splash: crate::splash::SplashScreen::new(),
         })
     }
 

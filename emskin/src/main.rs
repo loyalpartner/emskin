@@ -8,6 +8,7 @@ mod input;
 pub mod ipc;
 mod protocols;
 mod skeleton;
+mod splash;
 mod state;
 mod utils;
 mod winit;
