@@ -111,3 +111,123 @@ impl IpcConn {
         !self.write_buf.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    fn make_pair() -> (IpcConn, UnixStream) {
+        let (a, b) = UnixStream::pair().unwrap();
+        (IpcConn::new(a).unwrap(), b)
+    }
+
+    /// Write a properly framed message to the raw stream.
+    fn write_framed(stream: &mut UnixStream, payload: &[u8]) {
+        let len = payload.len() as u32;
+        stream.write_all(&len.to_le_bytes()).unwrap();
+        stream.write_all(payload).unwrap();
+    }
+
+    #[test]
+    fn try_recv_returns_none_on_empty_buffer() {
+        let (mut conn, _peer) = make_pair();
+        assert!(conn.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn try_recv_returns_none_on_incomplete_header() {
+        let (mut conn, mut peer) = make_pair();
+        // Write only 2 bytes (header needs 4).
+        peer.write_all(&[0x05, 0x00]).unwrap();
+        conn.fill_read_buf().ok();
+        assert!(conn.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn try_recv_returns_none_on_incomplete_payload() {
+        let (mut conn, mut peer) = make_pair();
+        // Header says 10 bytes, but only write 5.
+        peer.write_all(&10u32.to_le_bytes()).unwrap();
+        peer.write_all(b"hello").unwrap();
+        conn.fill_read_buf().ok();
+        assert!(conn.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn try_recv_decodes_single_message() {
+        let (mut conn, mut peer) = make_pair();
+        let payload = b"hello world";
+        write_framed(&mut peer, payload);
+        conn.fill_read_buf().ok();
+        let msg = conn.try_recv().unwrap().unwrap();
+        assert_eq!(msg, payload);
+    }
+
+    #[test]
+    fn try_recv_handles_multiple_messages_in_one_read() {
+        let (mut conn, mut peer) = make_pair();
+        write_framed(&mut peer, b"msg1");
+        write_framed(&mut peer, b"msg2");
+        write_framed(&mut peer, b"msg3");
+        conn.fill_read_buf().ok();
+
+        assert_eq!(conn.try_recv().unwrap().unwrap(), b"msg1");
+        assert_eq!(conn.try_recv().unwrap().unwrap(), b"msg2");
+        assert_eq!(conn.try_recv().unwrap().unwrap(), b"msg3");
+        assert!(conn.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn try_recv_handles_empty_payload() {
+        let (mut conn, mut peer) = make_pair();
+        write_framed(&mut peer, b"");
+        conn.fill_read_buf().ok();
+        let msg = conn.try_recv().unwrap().unwrap();
+        assert!(msg.is_empty());
+    }
+
+    #[test]
+    fn try_recv_rejects_oversized_message() {
+        let (mut conn, mut peer) = make_pair();
+        // Write a header claiming 2 MiB (exceeds MAX_MSG_SIZE of 1 MiB).
+        let huge_len = (2 * 1024 * 1024u32).to_le_bytes();
+        peer.write_all(&huge_len).unwrap();
+        conn.fill_read_buf().ok();
+        let result = conn.try_recv();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn enqueue_and_flush_roundtrip() {
+        let (mut conn, mut peer) = make_pair();
+        peer.set_nonblocking(true).unwrap();
+
+        let msg = OutgoingMessage::Connected { version: "0.1.0" };
+        conn.enqueue(&msg);
+        assert!(conn.has_pending_writes());
+
+        conn.try_flush().unwrap();
+        assert!(!conn.has_pending_writes());
+
+        // Read the framed message from the peer side.
+        peer.set_nonblocking(false).unwrap();
+        let mut header = [0u8; 4];
+        peer.read_exact(&mut header).unwrap();
+        let len = u32::from_le_bytes(header) as usize;
+        let mut payload = vec![0u8; len];
+        peer.read_exact(&mut payload).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(json["type"], "connected");
+        assert_eq!(json["version"], "0.1.0");
+    }
+
+    #[test]
+    fn fill_read_buf_detects_eof() {
+        let (mut conn, peer) = make_pair();
+        drop(peer); // Close the peer end.
+        let eof = conn.fill_read_buf().unwrap();
+        assert!(eof);
+    }
+}

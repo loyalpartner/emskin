@@ -669,6 +669,41 @@ impl EmskinState {
     }
 }
 
+/// Resize and reposition the Emacs window in a given space.
+/// Handles both Wayland (pgtk) and X11 (gtk3 via XWayland) paths.
+pub fn resize_emacs_in_space(
+    space: &mut Space<Window>,
+    emacs_surface: &Option<WlSurface>,
+    emacs_x11_window: &Option<Window>,
+    geo: Rectangle<i32, Logical>,
+) {
+    // Wayland (pgtk) path.
+    if let Some(ref emacs) = emacs_surface {
+        let win = space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == emacs))
+            .cloned();
+        if let Some(window) = win {
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.size = Some(geo.size);
+                });
+                toplevel.send_pending_configure();
+            }
+            space.map_element(window, geo.loc, false);
+            return;
+        }
+    }
+    // X11 (gtk3) path.
+    if let Some(ref win) = emacs_x11_window {
+        if let Some(x11) = win.x11_surface() {
+            if let Err(e) = x11.configure(geo) {
+                tracing::warn!("X11 Emacs resize failed: {e}");
+            }
+        }
+    }
+}
+
 /// Data associated with each wayland client connection.
 #[derive(Default)]
 pub struct ClientState {

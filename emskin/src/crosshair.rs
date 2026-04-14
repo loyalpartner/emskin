@@ -67,6 +67,12 @@ pub struct CrosshairOverlay {
     last_pos: Option<(i32, i32)>,
 }
 
+impl Default for CrosshairOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CrosshairOverlay {
     pub fn new() -> Self {
         Self {

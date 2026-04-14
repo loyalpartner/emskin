@@ -95,6 +95,12 @@ pub struct WorkspaceBar {
     last_title: String,
 }
 
+impl Default for WorkspaceBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkspaceBar {
     pub fn new() -> Self {
         Self {

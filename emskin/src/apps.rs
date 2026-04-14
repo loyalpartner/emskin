@@ -227,3 +227,81 @@ impl AppManager {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::utils::Size;
+
+    #[test]
+    fn aspect_fit_ratio_returns_none_for_zero_src_width() {
+        let src: Size<f64, Logical> = (0.0, 100.0).into();
+        let dst: Size<f64, Logical> = (200.0, 200.0).into();
+        assert!(AppManager::aspect_fit_ratio(src, dst).is_none());
+    }
+
+    #[test]
+    fn aspect_fit_ratio_returns_none_for_zero_src_height() {
+        let src: Size<f64, Logical> = (100.0, 0.0).into();
+        let dst: Size<f64, Logical> = (200.0, 200.0).into();
+        assert!(AppManager::aspect_fit_ratio(src, dst).is_none());
+    }
+
+    #[test]
+    fn aspect_fit_ratio_returns_none_for_zero_dst_width() {
+        let src: Size<f64, Logical> = (100.0, 100.0).into();
+        let dst: Size<f64, Logical> = (0.0, 200.0).into();
+        assert!(AppManager::aspect_fit_ratio(src, dst).is_none());
+    }
+
+    #[test]
+    fn aspect_fit_ratio_returns_none_for_zero_dst_height() {
+        let src: Size<f64, Logical> = (100.0, 100.0).into();
+        let dst: Size<f64, Logical> = (200.0, 0.0).into();
+        assert!(AppManager::aspect_fit_ratio(src, dst).is_none());
+    }
+
+    #[test]
+    fn aspect_fit_ratio_equal_sizes_returns_one() {
+        let size: Size<f64, Logical> = (100.0, 100.0).into();
+        let ratio = AppManager::aspect_fit_ratio(size, size).unwrap();
+        assert!((ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aspect_fit_ratio_landscape_src_in_square_dst() {
+        // 200x100 into 100x100 → scale by 0.5 (width-limited)
+        let src: Size<f64, Logical> = (200.0, 100.0).into();
+        let dst: Size<f64, Logical> = (100.0, 100.0).into();
+        let ratio = AppManager::aspect_fit_ratio(src, dst).unwrap();
+        assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aspect_fit_ratio_portrait_src_in_square_dst() {
+        // 100x200 into 100x100 → scale by 0.5 (height-limited)
+        let src: Size<f64, Logical> = (100.0, 200.0).into();
+        let dst: Size<f64, Logical> = (100.0, 100.0).into();
+        let ratio = AppManager::aspect_fit_ratio(src, dst).unwrap();
+        assert!((ratio - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aspect_fit_ratio_dst_larger_than_src() {
+        // 100x100 into 400x200 → scale by 2.0 (height-limited)
+        let src: Size<f64, Logical> = (100.0, 100.0).into();
+        let dst: Size<f64, Logical> = (400.0, 200.0).into();
+        let ratio = AppManager::aspect_fit_ratio(src, dst).unwrap();
+        assert!((ratio - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn alloc_id_returns_sequential_ids() {
+        let mut mgr = AppManager::default();
+        let id1 = mgr.alloc_id();
+        let id2 = mgr.alloc_id();
+        let id3 = mgr.alloc_id();
+        assert_eq!(id2, id1 + 1);
+        assert_eq!(id3, id2 + 1);
+    }
+}

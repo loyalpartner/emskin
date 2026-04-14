@@ -519,7 +519,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
 /// Resize only the Emacs toplevel; embedded app sizes come from Emacs via IPC.
 fn resize_emacs_surface(state: &mut EmskinState, logical: Size<i32, Logical>) {
     let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
-    crate::resize_emacs_in_space(
+    crate::state::resize_emacs_in_space(
         &mut state.space,
         &state.emacs_surface.clone(),
         &state.emacs_x11_window.clone(),
@@ -597,7 +597,7 @@ pub fn init_winit(
                         // Also resize Emacs in all inactive workspaces.
                         let geo = smithay::utils::Rectangle::new((0, 0).into(), logical);
                         for ws in state.inactive_workspaces.values_mut() {
-                            crate::resize_emacs_in_space(
+                            crate::state::resize_emacs_in_space(
                                 &mut ws.space,
                                 &ws.emacs_surface,
                                 &ws.emacs_x11_window,

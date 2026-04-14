@@ -1,23 +1,8 @@
-pub mod apps;
-mod clipboard;
-mod clipboard_x11;
-mod crosshair;
-mod cursor_x11;
-mod handlers;
-mod input;
-pub mod ipc;
-mod protocols;
-mod skeleton;
-mod splash;
-mod state;
-mod utils;
-mod winit;
-mod workspace_bar;
-
 use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::{Display, Resource};
-pub use state::EmskinState;
+
+use emskin::{clipboard, clipboard_x11, cursor_x11, ipc, state, EmskinState};
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../elisp");
 static DEMO_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../demo");
@@ -94,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let ipc = crate::ipc::IpcServer::bind(ipc_path)?;
+    let ipc = emskin::ipc::IpcServer::bind(ipc_path)?;
     let loop_handle = event_loop.handle();
     let mut state = EmskinState::new(&mut event_loop, loop_handle, display, ipc, xkb_config)?;
 
@@ -110,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     register_ipc_source(&mut event_loop, &state)?;
 
     // Open a Wayland/X11 window for our nested compositor
-    crate::winit::init_winit(&mut event_loop, &mut state)?;
+    emskin::winit::init_winit(&mut event_loop, &mut state)?;
 
     match cli.bar.as_str() {
         "builtin" | "none" => {}
@@ -167,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 state.inactive_workspaces.insert(
                     ws_id,
-                    crate::state::Workspace {
+                    emskin::state::Workspace {
                         space: new_space,
                         emacs_surface: Some(emacs_wl),
                         emacs_x11_window: None,
@@ -213,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.needs_redraw = true;
         }
         for action in actions {
-            use crate::protocols::workspace::WorkspaceAction;
+            use emskin::protocols::workspace::WorkspaceAction;
             match action {
                 WorkspaceAction::Activate(id) => {
                     if state.switch_workspace(id) {
@@ -293,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect();
 
-            let ws_infos: Vec<crate::protocols::workspace::WorkspaceInfo> = ws_named
+            let ws_infos: Vec<emskin::protocols::workspace::WorkspaceInfo> = ws_named
                 .iter()
                 .map(|&(id, name)| {
                     let display_name = if name.is_empty() {
@@ -301,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         name.to_string()
                     };
-                    crate::protocols::workspace::WorkspaceInfo {
+                    emskin::protocols::workspace::WorkspaceInfo {
                         id,
                         name: display_name,
                         active: id == state.active_workspace_id,
@@ -518,42 +503,6 @@ fn default_ipc_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{}/emskin-{pid}.ipc", runtime_dir()))
 }
 
-/// Resize and reposition the Emacs window in a given space.
-/// Resize and reposition the Emacs window in a given space.
-/// Handles both Wayland (pgtk) and X11 (gtk3 via XWayland) paths.
-pub fn resize_emacs_in_space(
-    space: &mut smithay::desktop::Space<smithay::desktop::Window>,
-    emacs_surface: &Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
-    emacs_x11_window: &Option<smithay::desktop::Window>,
-    geo: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
-) {
-    // Wayland (pgtk) path.
-    if let Some(ref emacs) = emacs_surface {
-        let win = space
-            .elements()
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == emacs))
-            .cloned();
-        if let Some(window) = win {
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.with_pending_state(|s| {
-                    s.size = Some(geo.size);
-                });
-                toplevel.send_pending_configure();
-            }
-            space.map_element(window, geo.loc, false);
-            return;
-        }
-    }
-    // X11 (gtk3) path.
-    if let Some(ref win) = emacs_x11_window {
-        if let Some(x11) = win.x11_surface() {
-            if let Err(e) = x11.configure(geo) {
-                tracing::warn!("X11 Emacs resize failed: {e}");
-            }
-        }
-    }
-}
-
 /// Resize and reposition all Emacs frames to account for bar height changes.
 /// Called when workspace count transitions (1→2 or 2→1).
 fn resize_all_emacs_for_bar(state: &mut EmskinState) {
@@ -568,14 +517,14 @@ fn resize_all_emacs_for_bar(state: &mut EmskinState) {
         geo.size.h,
     );
 
-    resize_emacs_in_space(
+    state::resize_emacs_in_space(
         &mut state.space,
         &state.emacs_surface.clone(),
         &state.emacs_x11_window.clone(),
         geo,
     );
     for ws in state.inactive_workspaces.values_mut() {
-        resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
+        state::resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
     }
 
     state.ipc.send(ipc::OutgoingMessage::SurfaceSize {
@@ -795,7 +744,7 @@ fn ipc_add_mirror(
     };
     app.mirrors.insert(
         view_id,
-        crate::apps::MirrorView {
+        emskin::apps::MirrorView {
             geometry: geo,
             workspace_id: ws_id,
         },
@@ -1035,10 +984,10 @@ fn handle_clipboard_event(state: &mut EmskinState, event: clipboard::ClipboardEv
             tracing::debug!("Host source cancelled ({target:?})");
             match target {
                 smithay::wayland::selection::SelectionTarget::Clipboard => {
-                    state.clipboard_origin = crate::state::SelectionOrigin::default();
+                    state.clipboard_origin = emskin::state::SelectionOrigin::default();
                 }
                 smithay::wayland::selection::SelectionTarget::Primary => {
-                    state.primary_origin = crate::state::SelectionOrigin::default();
+                    state.primary_origin = emskin::state::SelectionOrigin::default();
                 }
             }
         }
@@ -1147,7 +1096,7 @@ fn forward_client_selection(
     use smithay::wayland::selection::primary_selection::request_primary_client_selection;
     use smithay::wayland::selection::SelectionTarget;
 
-    use crate::state::SelectionOrigin;
+    use emskin::state::SelectionOrigin;
 
     let origin = match target {
         SelectionTarget::Clipboard => state.clipboard_origin,

@@ -121,6 +121,12 @@ pub struct SplashScreen {
     bar_commit: CommitCounter,
 }
 
+impl Default for SplashScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SplashScreen {
     pub fn new() -> Self {
         let letters = LETTER_COLORS
