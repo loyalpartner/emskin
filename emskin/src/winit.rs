@@ -335,7 +335,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
     }
 
     state.space.refresh();
-    state.popups.cleanup();
+    state.wl.popups.cleanup();
 
     // Poll for X11 Emacs wl_surface (XWayland associates it asynchronously).
     if state.emacs_surface.is_none() {
@@ -542,6 +542,7 @@ fn init_dmabuf(backend: &mut WinitGraphicsBackend<GlesRenderer>, state: &mut Ems
         Some((node, feedback)) => {
             tracing::info!("DMA-BUF v4 initialized (render node: {node:?})");
             state
+                .wl
                 .dmabuf_state
                 .create_global_with_default_feedback::<EmskinState>(
                     &state.display_handle,
@@ -551,11 +552,12 @@ fn init_dmabuf(backend: &mut WinitGraphicsBackend<GlesRenderer>, state: &mut Ems
         None => {
             tracing::info!("DMA-BUF v3 initialized (no render node or feedback build failed)");
             state
+                .wl
                 .dmabuf_state
                 .create_global::<EmskinState>(&state.display_handle, dmabuf_formats)
         }
     };
-    state.dmabuf_global = Some(global);
+    state.wl.dmabuf_global = Some(global);
 }
 
 fn handle_ime_event(

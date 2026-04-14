@@ -8,7 +8,7 @@ use crate::EmskinState;
 
 impl DmabufHandler for EmskinState {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
-        &mut self.dmabuf_state
+        &mut self.wl.dmabuf_state
     }
 
     fn dmabuf_imported(

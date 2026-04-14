@@ -23,7 +23,7 @@ use crate::EmskinState;
 
 impl XdgShellHandler for EmskinState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
-        &mut self.xdg_shell_state
+        &mut self.wl.xdg_shell_state
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
@@ -133,7 +133,7 @@ impl XdgShellHandler for EmskinState {
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         self.unconstrain_popup(&surface);
-        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+        if let Err(e) = self.wl.popups.track_popup(PopupKind::Xdg(surface)) {
             tracing::warn!("Failed to track popup: {}", e);
         }
     }
@@ -176,7 +176,7 @@ impl XdgShellHandler for EmskinState {
         let kind = PopupKind::Xdg(surface);
 
         if let Ok(root) = find_popup_root_surface(&kind) {
-            let ret = self.popups.grab_popup(root, kind, &seat, serial);
+            let ret = self.wl.popups.grab_popup(root, kind, &seat, serial);
 
             match ret {
                 Ok(mut grab) => {

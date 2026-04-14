@@ -34,7 +34,7 @@ impl SeatHandler for EmskinState {
     type TouchFocus = WlSurface;
 
     fn seat_state(&mut self) -> &mut SeatState<EmskinState> {
-        &mut self.seat_state
+        &mut self.wl.seat_state
     }
 
     fn cursor_image(
@@ -156,7 +156,7 @@ impl SelectionHandler for EmskinState {
 
 impl DataDeviceHandler for EmskinState {
     fn data_device_state(&mut self) -> &mut DataDeviceState {
-        &mut self.data_device_state
+        &mut self.wl.data_device_state
     }
 }
 
@@ -198,7 +198,7 @@ delegate_data_device!(EmskinState);
 
 impl PrimarySelectionHandler for EmskinState {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
-        &mut self.primary_selection_state
+        &mut self.wl.primary_selection_state
     }
 }
 

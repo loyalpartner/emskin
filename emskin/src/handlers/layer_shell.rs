@@ -10,7 +10,7 @@ use crate::EmskinState;
 
 impl WlrLayerShellHandler for EmskinState {
     fn shell_state(&mut self) -> &mut WlrLayerShellState {
-        &mut self.layer_shell_state
+        &mut self.wl.layer_shell_state
     }
 
     fn new_layer_surface(

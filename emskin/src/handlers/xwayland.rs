@@ -260,7 +260,7 @@ impl XwmHandler for EmskinState {
 
 impl XWaylandShellHandler for EmskinState {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
-        &mut self.xwayland_shell_state
+        &mut self.wl.xwayland_shell_state
     }
 }
 

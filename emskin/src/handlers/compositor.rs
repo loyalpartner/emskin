@@ -24,7 +24,7 @@ use super::xdg_shell;
 
 impl CompositorHandler for EmskinState {
     fn compositor_state(&mut self) -> &mut CompositorState {
-        &mut self.compositor_state
+        &mut self.wl.compositor_state
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
@@ -108,7 +108,7 @@ impl CompositorHandler for EmskinState {
             return;
         }
 
-        xdg_shell::handle_surface_commit(&mut self.popups, &self.space, surface);
+        xdg_shell::handle_surface_commit(&mut self.wl.popups, &self.space, surface);
 
         // Fire frame callbacks for surfaces not tracked in space or layer map
         // (e.g., temporary Vulkan test surfaces created during GPU init).
@@ -139,7 +139,7 @@ impl BufferHandler for EmskinState {
 
 impl ShmHandler for EmskinState {
     fn shm_state(&self) -> &ShmState {
-        &self.shm_state
+        &self.wl.shm_state
     }
 }
 

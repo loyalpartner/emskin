@@ -75,6 +75,28 @@ pub struct SelectionState {
     pub host_primary_mimes: Vec<String>,
 }
 
+/// Smithay Wayland protocol state — pure bookkeeping for compositor protocols.
+pub struct WaylandState {
+    pub compositor_state: CompositorState,
+    pub xdg_shell_state: XdgShellState,
+    pub shm_state: ShmState,
+    pub output_manager_state: OutputManagerState,
+    pub seat_state: SeatState<EmskinState>,
+    pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
+    pub viewporter_state: ViewporterState,
+    pub xdg_decoration_state: XdgDecorationState,
+    pub layer_shell_state: WlrLayerShellState,
+    pub xwayland_shell_state: XWaylandShellState,
+    pub cursor_shape_manager_state: CursorShapeManagerState,
+    pub dmabuf_state: DmabufState,
+    /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
+    pub dmabuf_global: Option<DmabufGlobal>,
+    pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
+    pub popups: PopupManager,
+}
+
 pub struct PendingCommand {
     pub command: String,
     pub args: Vec<String>,
@@ -125,25 +147,8 @@ pub struct EmskinState {
     /// `DmabufHandler::dmabuf_imported` can access the renderer.
     pub backend: Option<WinitGraphicsBackend<GlesRenderer>>,
 
-    // Smithay State
-    pub compositor_state: CompositorState,
-    pub xdg_shell_state: XdgShellState,
-    pub shm_state: ShmState,
-    pub output_manager_state: OutputManagerState,
-    pub seat_state: SeatState<EmskinState>,
-    pub data_device_state: DataDeviceState,
-    pub primary_selection_state: PrimarySelectionState,
-    pub fractional_scale_manager_state: FractionalScaleManagerState,
-    pub viewporter_state: ViewporterState,
-    pub xdg_decoration_state: XdgDecorationState,
-    pub layer_shell_state: WlrLayerShellState,
-    pub xwayland_shell_state: XWaylandShellState,
-    pub cursor_shape_manager_state: CursorShapeManagerState,
-    pub dmabuf_state: DmabufState,
-    /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
-    pub dmabuf_global: Option<DmabufGlobal>,
-    pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
-    pub popups: PopupManager,
+    // Smithay protocol state (grouped for clarity).
+    pub wl: WaylandState,
 
     // XWayland
     pub xwm: Option<X11Wm>,
@@ -287,23 +292,25 @@ impl EmskinState {
 
             backend: None,
 
-            compositor_state,
-            xdg_shell_state,
-            shm_state,
-            output_manager_state,
-            seat_state,
-            data_device_state,
-            primary_selection_state,
-            fractional_scale_manager_state,
-            viewporter_state,
-            xdg_decoration_state,
-            layer_shell_state,
-            xwayland_shell_state,
-            cursor_shape_manager_state,
-            dmabuf_state,
-            dmabuf_global: None,
-            text_input_manager_state,
-            popups,
+            wl: WaylandState {
+                compositor_state,
+                xdg_shell_state,
+                shm_state,
+                output_manager_state,
+                seat_state,
+                data_device_state,
+                primary_selection_state,
+                fractional_scale_manager_state,
+                viewporter_state,
+                xdg_decoration_state,
+                layer_shell_state,
+                xwayland_shell_state,
+                cursor_shape_manager_state,
+                dmabuf_state,
+                dmabuf_global: None,
+                text_input_manager_state,
+                popups,
+            },
             xwm: None,
             xdisplay: None,
             x11_cursor_tracker: None,
