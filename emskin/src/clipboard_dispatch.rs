@@ -23,7 +23,7 @@ pub fn handle_clipboard_event(state: &mut EmskinState, event: ClipboardEvent) {
             if let Some(read_fd) = read_fd {
                 if !register_outgoing_pipe(state, id, read_fd) {
                     // Calloop registration failed — clean up and notify X11 requestor.
-                    if let Some(ref mut cb) = state.clipboard {
+                    if let Some(ref mut cb) = state.selection.clipboard {
                         cb.complete_outgoing(id, Vec::new());
                     }
                 }
@@ -33,10 +33,10 @@ pub fn handle_clipboard_event(state: &mut EmskinState, event: ClipboardEvent) {
             tracing::debug!("Host source cancelled ({target:?})");
             match target {
                 smithay::wayland::selection::SelectionTarget::Clipboard => {
-                    state.clipboard_origin = SelectionOrigin::default();
+                    state.selection.clipboard_origin = SelectionOrigin::default();
                 }
                 smithay::wayland::selection::SelectionTarget::Primary => {
-                    state.primary_origin = SelectionOrigin::default();
+                    state.selection.primary_origin = SelectionOrigin::default();
                 }
             }
         }
@@ -58,8 +58,8 @@ fn inject_host_selection(
 
     // Cache host mime types for replay when XWM becomes ready.
     match target {
-        SelectionTarget::Clipboard => state.host_clipboard_mimes = mime_types.clone(),
-        SelectionTarget::Primary => state.host_primary_mimes = mime_types.clone(),
+        SelectionTarget::Clipboard => state.selection.host_clipboard_mimes = mime_types.clone(),
+        SelectionTarget::Primary => state.selection.host_primary_mimes = mime_types.clone(),
     }
 
     if mime_types.is_empty() {
@@ -104,8 +104,8 @@ fn forward_client_selection(
     use smithay::wayland::selection::SelectionTarget;
 
     let origin = match target {
-        SelectionTarget::Clipboard => state.clipboard_origin,
-        SelectionTarget::Primary => state.primary_origin,
+        SelectionTarget::Clipboard => state.selection.clipboard_origin,
+        SelectionTarget::Primary => state.selection.primary_origin,
     };
 
     match origin {
@@ -161,7 +161,7 @@ fn register_outgoing_pipe(
                     buf_data.extend_from_slice(&buf[..n as usize]);
                 } else if n == 0 {
                     let data = std::mem::take(&mut buf_data);
-                    if let Some(ref mut clipboard) = state.clipboard {
+                    if let Some(ref mut clipboard) = state.selection.clipboard {
                         clipboard.complete_outgoing(id, data);
                     }
                     return Ok(PostAction::Remove);

@@ -57,7 +57,7 @@ impl SeatHandler for EmskinState {
         // gates these behind has_instance() which is always false here.
         use smithay::wayland::text_input::TextInputSeat;
         let ti = seat.text_input();
-        let old = self.text_input_focus.take();
+        let old = self.focus.text_input_focus.take();
         let new = focused.cloned();
         if old.as_ref() != new.as_ref() {
             if old.is_some() {
@@ -69,7 +69,7 @@ impl SeatHandler for EmskinState {
                 ti.enter();
             }
         }
-        self.text_input_focus = new;
+        self.focus.text_input_focus = new;
 
         // Only enable host IME when the focused client has bound text_input_v3.
         // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
@@ -78,8 +78,8 @@ impl SeatHandler for EmskinState {
         ti.with_focused_text_input(|_, _| {
             has_ti = true;
         });
-        if self.pending_ime_allowed != Some(has_ti) {
-            self.pending_ime_allowed = Some(has_ti);
+        if self.focus.pending_ime_allowed != Some(has_ti) {
+            self.focus.pending_ime_allowed = Some(has_ti);
         }
     }
 }
@@ -103,7 +103,7 @@ impl SelectionHandler for EmskinState {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        let Some(ref mut clipboard) = self.clipboard else {
+        let Some(ref mut clipboard) = self.selection.clipboard else {
             return;
         };
         if let Some(source) = source {
@@ -124,10 +124,10 @@ impl SelectionHandler for EmskinState {
             }
             match ty {
                 SelectionTarget::Clipboard => {
-                    self.clipboard_origin = crate::state::SelectionOrigin::Wayland
+                    self.selection.clipboard_origin = crate::state::SelectionOrigin::Wayland
                 }
                 SelectionTarget::Primary => {
-                    self.primary_origin = crate::state::SelectionOrigin::Wayland
+                    self.selection.primary_origin = crate::state::SelectionOrigin::Wayland
                 }
             }
             clipboard.set_host_selection(ty, &mime_types);
@@ -147,7 +147,7 @@ impl SelectionHandler for EmskinState {
     ) {
         // Internal client wants to paste our compositor-injected (host) selection.
         // Forward the fd directly to the host so the host source writes into it.
-        if let Some(ref mut clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.selection.clipboard {
             tracing::debug!("Forwarding host selection to internal client ({ty:?}, {mime_type})");
             clipboard.receive_from_host(ty, &mime_type, fd);
         }

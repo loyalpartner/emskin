@@ -46,6 +46,35 @@ pub enum SelectionOrigin {
     X11,
 }
 
+/// Focus-related state grouped together for clarity.
+#[derive(Default)]
+pub struct FocusState {
+    /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
+    /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
+    pub prefix_saved_focus: Option<Option<WlSurface>>,
+    /// Tracks text_input focus for manual enter/leave management.
+    pub text_input_focus: Option<WlSurface>,
+    /// Deferred `set_ime_allowed` for the winit window.
+    pub pending_ime_allowed: Option<bool>,
+    /// Saved keyboard focus before a layer surface took it.
+    pub layer_saved_focus: Option<WlSurface>,
+}
+
+/// Clipboard/selection routing state grouped together.
+#[derive(Default)]
+pub struct SelectionState {
+    /// Clipboard synchronization proxy (Wayland or X11 backend).
+    pub clipboard: Option<Box<dyn crate::clipboard::ClipboardBackend>>,
+    /// Where the current clipboard selection came from.
+    pub clipboard_origin: SelectionOrigin,
+    /// Where the current primary selection came from.
+    pub primary_origin: SelectionOrigin,
+    /// Cached host clipboard mime types for XWM replay.
+    pub host_clipboard_mimes: Vec<String>,
+    /// Cached host primary mime types for XWM replay.
+    pub host_primary_mimes: Vec<String>,
+}
+
 pub struct PendingCommand {
     pub command: String,
     pub args: Vec<String>,
@@ -158,23 +187,11 @@ pub struct EmskinState {
     /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
     pub pending_command: Option<PendingCommand>,
 
-    /// Clipboard synchronization proxy (Wayland or X11 backend, None if unavailable)
-    pub clipboard: Option<Box<dyn crate::clipboard::ClipboardBackend>>,
+    /// Clipboard/selection routing state.
+    pub selection: SelectionState,
 
-    /// Where the current clipboard/primary selection came from.
-    /// Used to route host paste requests to the correct source.
-    pub clipboard_origin: SelectionOrigin,
-    pub primary_origin: SelectionOrigin,
-
-    /// Cached host selection mime types — replayed into XWM when it becomes ready
-    /// (the initial HostSelectionChanged event may fire before XWM is available).
-    pub host_clipboard_mimes: Vec<String>,
-    pub host_primary_mimes: Vec<String>,
-
-    /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
-    /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
-    /// Cleared on prefix_done IPC, click, or set_focus.
-    pub prefix_saved_focus: Option<Option<WlSurface>>,
+    /// Focus management state.
+    pub focus: FocusState,
 
     /// Crosshair overlay (caliper tool).
     pub crosshair: crate::crosshair::CrosshairOverlay,
@@ -187,22 +204,12 @@ pub struct EmskinState {
     /// downstream surface never sees an unpaired release.
     pub skeleton_click_absorbed: bool,
 
-    /// Tracks text_input focus for manual enter/leave management.
-    pub text_input_focus: Option<WlSurface>,
-
-    /// Deferred `set_ime_allowed` for the winit window. Set in `focus_changed`
-    /// (which cannot access the backend) and applied in `apply_pending_state`.
-    pub pending_ime_allowed: Option<bool>,
 
     /// Current cursor image status. For Named, the host cursor is used;
     /// for Surface (GTK3/Emacs), the cursor is software-rendered each frame.
     pub cursor_status: CursorImageStatus,
     /// Set when cursor_status changes; consumed by apply_pending_state.
     pub cursor_changed: bool,
-
-    /// Saved keyboard focus before a layer surface (launcher/overlay) took it.
-    /// Restored when the layer surface is destroyed.
-    pub layer_saved_focus: Option<WlSurface>,
 
     /// Coarse damage flag for structural events (IPC, layer shell, input,
     /// workspace switch) that smithay's per-element OutputDamageTracker does
@@ -313,20 +320,13 @@ impl EmskinState {
             emacs_title: None,
             emacs_app_id: None,
             pending_command: None,
-            clipboard: None,
-            clipboard_origin: SelectionOrigin::default(),
-            primary_origin: SelectionOrigin::default(),
-            host_clipboard_mimes: Vec::new(),
-            host_primary_mimes: Vec::new(),
-            prefix_saved_focus: None,
+            selection: SelectionState::default(),
+            focus: FocusState::default(),
             crosshair: crate::crosshair::CrosshairOverlay::new(),
             skeleton: crate::skeleton::SkeletonOverlay::new(),
             skeleton_click_absorbed: false,
-            text_input_focus: None,
-            pending_ime_allowed: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_changed: false,
-            layer_saved_focus: None,
             needs_redraw: true,
             splash: crate::splash::SplashScreen::new(),
         })
@@ -521,10 +521,10 @@ impl EmskinState {
         // apps are displayed in which Emacs frame.
 
         // Reset state that references the old workspace's surfaces.
-        self.prefix_saved_focus = None;
-        self.layer_saved_focus = None;
-        self.text_input_focus = None;
-        self.pending_ime_allowed = Some(false);
+        self.focus.prefix_saved_focus = None;
+        self.focus.layer_saved_focus = None;
+        self.focus.text_input_focus = None;
+        self.focus.pending_ime_allowed = Some(false);
         self.skeleton.clear();
         self.skeleton.enabled = false;
         self.skeleton_click_absorbed = false;

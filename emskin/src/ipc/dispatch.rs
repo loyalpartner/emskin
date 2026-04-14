@@ -174,7 +174,7 @@ fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
 }
 
 fn ipc_prefix_done(state: &mut EmskinState) {
-    let Some(saved) = state.prefix_saved_focus.take() else {
+    let Some(saved) = state.focus.prefix_saved_focus.take() else {
         return;
     };
     let Some(keyboard) = state.seat.get_keyboard() else {
@@ -264,7 +264,7 @@ fn ipc_set_focus(state: &mut EmskinState, window_id: Option<u64>) {
         None => state.emacs_surface.clone(),
     };
     tracing::debug!("IPC set_focus window_id={window_id:?}");
-    state.prefix_saved_focus = None;
+    state.focus.prefix_saved_focus = None;
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     keyboard.set_focus(state, target, serial);
 }

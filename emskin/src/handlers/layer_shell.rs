@@ -86,6 +86,7 @@ impl WlrLayerShellHandler for EmskinState {
         if let Some(keyboard) = self.seat.get_keyboard() {
             if keyboard.current_focus().as_ref() == Some(surface.wl_surface()) {
                 let restore = self
+                    .focus
                     .layer_saved_focus
                     .take()
                     .filter(|s| s.is_alive())

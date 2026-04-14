@@ -85,13 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize clipboard synchronization with host compositor.
     // Try Wayland data_control first; fall back to X11 selection protocol.
-    state.clipboard = clipboard::ClipboardProxy::new()
+    state.selection.clipboard = clipboard::ClipboardProxy::new()
         .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
         .or_else(|| {
             clipboard_x11::X11ClipboardProxy::new()
                 .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
         });
-    if let Some(ref clipboard) = state.clipboard {
+    if let Some(ref clipboard) = state.selection.clipboard {
         register_clipboard_source(&mut event_loop, clipboard.as_ref())?;
     }
 
@@ -298,8 +298,8 @@ fn start_xwayland(
                     {
                         use smithay::wayland::selection::SelectionTarget;
                         let pairs = [
-                            (SelectionTarget::Clipboard, &state.host_clipboard_mimes),
-                            (SelectionTarget::Primary, &state.host_primary_mimes),
+                            (SelectionTarget::Clipboard, &state.selection.host_clipboard_mimes),
+                            (SelectionTarget::Primary, &state.selection.host_primary_mimes),
                         ];
                         for (target, mimes) in pairs {
                             if !mimes.is_empty() {
@@ -355,7 +355,7 @@ fn register_clipboard_source(
         .insert_source(
             Generic::new(file, Interest::READ, Mode::Level),
             |_, _, state| {
-                if let Some(ref mut clipboard) = state.clipboard {
+                if let Some(ref mut clipboard) = state.selection.clipboard {
                     clipboard.dispatch();
                 }
                 Ok(PostAction::Continue)

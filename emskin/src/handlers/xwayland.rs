@@ -209,17 +209,17 @@ impl XwmHandler for EmskinState {
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
         tracing::debug!("X11 selection set ({selection:?}): {mime_types:?}");
-        if let Some(ref mut clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.selection.clipboard {
             if !self.ipc.is_connected() {
                 tracing::debug!("Skipping pre-IPC X11 {selection:?} selection");
                 return;
             }
             match selection {
                 SelectionTarget::Clipboard => {
-                    self.clipboard_origin = crate::state::SelectionOrigin::X11
+                    self.selection.clipboard_origin = crate::state::SelectionOrigin::X11
                 }
                 SelectionTarget::Primary => {
-                    self.primary_origin = crate::state::SelectionOrigin::X11
+                    self.selection.primary_origin = crate::state::SelectionOrigin::X11
                 }
             }
             clipboard.set_host_selection(selection, &mime_types);
@@ -230,15 +230,15 @@ impl XwmHandler for EmskinState {
         tracing::debug!("X11 selection cleared ({selection:?})");
         match selection {
             SelectionTarget::Clipboard => {
-                self.host_clipboard_mimes.clear();
-                self.clipboard_origin = crate::state::SelectionOrigin::default();
+                self.selection.host_clipboard_mimes.clear();
+                self.selection.clipboard_origin = crate::state::SelectionOrigin::default();
             }
             SelectionTarget::Primary => {
-                self.host_primary_mimes.clear();
-                self.primary_origin = crate::state::SelectionOrigin::default();
+                self.selection.host_primary_mimes.clear();
+                self.selection.primary_origin = crate::state::SelectionOrigin::default();
             }
         }
-        if let Some(ref mut clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.selection.clipboard {
             clipboard.clear_host_selection(selection);
         }
     }
@@ -251,7 +251,7 @@ impl XwmHandler for EmskinState {
         fd: OwnedFd,
     ) {
         // X11 client wants to paste — forward from host clipboard.
-        if let Some(ref mut clipboard) = self.clipboard {
+        if let Some(ref mut clipboard) = self.selection.clipboard {
             tracing::debug!("X11 paste request ({selection:?}, {mime_type})");
             clipboard.receive_from_host(selection, &mime_type, fd);
         }

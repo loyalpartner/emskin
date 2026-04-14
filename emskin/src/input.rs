@@ -40,8 +40,8 @@ impl EmskinState {
                     },
                 );
 
-                if is_prefix && self.prefix_saved_focus.is_none() {
-                    self.prefix_saved_focus = Some(keyboard.current_focus());
+                if is_prefix && self.focus.prefix_saved_focus.is_none() {
+                    self.focus.prefix_saved_focus = Some(keyboard.current_focus());
                     if let Some(emacs) = self.emacs_surface.clone() {
                         if keyboard.current_focus().as_ref() != Some(&emacs) {
                             keyboard.set_focus(self, Some(emacs), SERIAL_COUNTER.next_serial());
@@ -219,7 +219,7 @@ impl EmskinState {
                     });
                     if !same_client {
                         keyboard.set_focus(self, focus, serial);
-                        self.prefix_saved_focus = None;
+                        self.focus.prefix_saved_focus = None;
                     }
                 }
 

@@ -43,6 +43,7 @@ pub fn event_loop_tick(state: &mut EmskinState) {
 
     // --- Process clipboard events from host compositor ---
     let clipboard_events = state
+        .selection
         .clipboard
         .as_mut()
         .map(|c| c.take_events())

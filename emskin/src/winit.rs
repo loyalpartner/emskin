@@ -78,7 +78,7 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_maximized(maximize);
     }
 
-    if let Some(allowed) = state.pending_ime_allowed.take() {
+    if let Some(allowed) = state.focus.pending_ime_allowed.take() {
         backend.window().set_ime_allowed(allowed);
     }
 
