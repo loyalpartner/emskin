@@ -142,6 +142,10 @@ xrandr --output Virtual-1 --mode 1920x1080
 
 确保安装了 mesa：`sudo pacman -S mesa mesa-utils`（Arch）或 `sudo apt install mesa-utils`（Debian/Ubuntu）。
 
+## 致谢
+
+基于 [Smithay](https://github.com/Smithay/smithay) 构建 — Rust 实现的 Wayland 合成器库。
+
 ## License
 
 GPL-3.0

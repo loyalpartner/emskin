@@ -142,6 +142,10 @@ xrandr --output Virtual-1 --mode 1920x1080
 
 Make sure mesa is installed: `sudo pacman -S mesa mesa-utils` (Arch) or `sudo apt install mesa-utils` (Debian/Ubuntu).
 
+## Acknowledgements
+
+Built on [Smithay](https://github.com/Smithay/smithay), a Wayland compositor library for Rust.
+
 ## License
 
 GPL-3.0
