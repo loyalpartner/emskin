@@ -26,7 +26,7 @@ jobs:
             libinput seatd mesa \
             libx11 libxcb xcb-util-cursor \
             fontconfig freetype2 \
-            xorg-xwayland
+            xorg-xwayland openssh
 
       - uses: actions/checkout@v4
 
@@ -35,6 +35,7 @@ jobs:
         run: |
           rustup default stable
           rustup show
+          cargo install cargo-aur
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -46,29 +47,24 @@ jobs:
           key: arch-x86_64-release-${{ hashFiles('emskin/Cargo.lock', 'emskin/Cargo.toml') }}
           restore-keys: arch-x86_64-release-
 
-      - name: Build release
+      - name: Build and package with cargo-aur
         working-directory: emskin
-        run: cargo build --release
-
-      - name: Strip binary
-        run: strip emskin/target/release/emskin
+        run: |
+          cp ../LICENSE .
+          cargo aur
+          rm LICENSE
 
       - name: Get version
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Package tarball
-        run: |
-          staging=$(mktemp -d)
-          cp emskin/target/release/emskin "$staging/"
-          cp LICENSE "$staging/"
-          tar czf emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz -C "$staging" .
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: emskin-x86_64
-          path: emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
+          path: |
+            emskin/target/cargo-aur/emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
+            emskin/target/cargo-aur/PKGBUILD
 
   release:
     name: Create Release
@@ -103,43 +99,11 @@ jobs:
         with:
           name: emskin-x86_64
 
-      - name: Get version
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate PKGBUILD
-        run: |
-          SHA=$(sha256sum emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz | cut -d' ' -f1)
-          cat > PKGBUILD << EOF
-          # Maintainer: Lee <loyalpartner@163.com>
-          pkgname=emskin-bin
-          pkgver=${{ steps.version.outputs.version }}
-          pkgrel=1
-          pkgdesc="Nested Wayland compositor for Emacs"
-          url="https://github.com/emskin/emskin"
-          license=("GPL-3.0-only")
-          arch=("x86_64")
-          depends=("wayland" "libxkbcommon" "libxkbcommon-x11" "mesa" "libinput" "seatd" "fontconfig" "freetype2" "xorg-xwayland")
-          provides=("emskin")
-          conflicts=("emskin")
-          source=("\${url}/releases/download/v\${pkgver}/emskin-\${pkgver}-x86_64.tar.gz")
-          sha256sums=("${SHA}")
-
-          package() {
-              install -Dm755 emskin -t "\$pkgdir/usr/bin"
-              install -Dm644 LICENSE "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
-          }
-          EOF
-          sed -i 's/^          //' PKGBUILD
-
       - name: Generate .SRCINFO
         run: |
           useradd -m builder
           cp PKGBUILD /home/builder/
-          cd /home/builder
-          su builder -c 'makepkg --printsrcinfo' > /home/builder/.SRCINFO
-          cp /home/builder/.SRCINFO "$GITHUB_WORKSPACE/"
-          cp PKGBUILD "$GITHUB_WORKSPACE/"
+          su builder -c 'cd ~ && makepkg --printsrcinfo' > .SRCINFO
 
       - name: Push to AUR
         env:
@@ -159,6 +123,6 @@ jobs:
           git config user.email "loyalpartner@163.com"
           git add PKGBUILD .SRCINFO
           git diff --cached --quiet || {
-            git commit -m "Update to v${{ steps.version.outputs.version }}"
+            git commit -m "Update to v${GITHUB_REF_NAME#v}"
             git push origin master
           }

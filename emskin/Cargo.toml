@@ -22,6 +22,14 @@ clap = { version = "4", features = ["derive"] }
 include_dir = "0.7"
 cosmic-text = "0.18"
 
+[package.metadata.aur]
+depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]
+optdepends = ["emacs-wayland: pgtk Emacs (recommended)", "emacs: X11 Emacs (works via XWayland)"]
+files = [
+    ["assets/emskin.desktop", "/usr/share/applications/emskin.desktop"],
+    ["assets/emskin.png", "/usr/share/pixmaps/emskin.png"],
+]
+
 [dependencies.smithay]
 git = "https://github.com/emskin/smithay.git"
 branch = "emskin-patches"

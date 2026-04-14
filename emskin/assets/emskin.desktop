@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=emskin
+Comment=Nested Wayland compositor for Emacs
+Exec=emskin --standalone
+Icon=emskin
+Type=Application
+Categories=Development;TextEditor;
+Keywords=emacs;wayland;compositor;
