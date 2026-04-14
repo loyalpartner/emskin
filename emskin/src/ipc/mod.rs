@@ -1,4 +1,5 @@
 mod connection;
+pub mod dispatch;
 pub mod messages;
 
 use std::os::unix::net::UnixListener;
