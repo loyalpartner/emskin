@@ -8,9 +8,7 @@
 
 emskin 把 Emacs 放进一个 Wayland 合成器里，让**任意程序**（浏览器、终端、视频播放器等）都能像原生 buffer 一样嵌入 Emacs 窗口。
 
-<p align="center">
-  <video src="images/demo.mp4" controls muted loop playsinline width="720"></video>
-</p>
+![demo](images/demo.gif)
 
 ## 特性
 
