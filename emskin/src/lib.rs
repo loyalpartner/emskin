@@ -11,6 +11,7 @@ pub mod protocols;
 pub mod skeleton;
 pub mod splash;
 pub mod state;
+pub mod tick;
 pub mod utils;
 pub mod winit;
 pub mod workspace_bar;
