@@ -1,0 +1,21 @@
+[package]
+name = "emskin-bar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "External workspace bar for emskin (layer-shell + ext-workspace-v1)"
+
+[[bin]]
+name = "emskin-bar"
+path = "src/main.rs"
+
+[dependencies]
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+cosmic-text.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
