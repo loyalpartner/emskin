@@ -44,8 +44,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            crates/emskin/target
-          key: arch-x86_64-release-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/emskin/Cargo.toml', 'crates/effect-core/Cargo.toml', 'crates/effect-plugins/Cargo.toml') }}
+          key: arch-x86_64-release-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml') }}
           restore-keys: arch-x86_64-release-
 
       - name: Pre-build emskin-bar
@@ -53,6 +52,12 @@ jobs:
 
       - name: Build and package with cargo-aur
         working-directory: crates/emskin
+        # cargo-aur hardcodes a relative `target/` path for both binary
+        # lookup and its own output, but cargo workspaces put the build
+        # output at the root `target/`. Point CARGO_TARGET_DIR explicitly
+        # so both sides agree.
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           cp ../../LICENSE .
           # cargo-aur reads [package.metadata.aur].files with paths relative
@@ -60,6 +65,12 @@ jobs:
           # the tarball + PKGBUILD carry it into /usr/bin/.
           cp ../../target/release/emskin-bar ./emskin-bar
           cargo aur
+          # cargo-aur hardcodes `install -Dm644` for every `files` entry,
+          # which is wrong for a binary (no execute bit). Patch the
+          # generated PKGBUILD so emskin-bar ends up executable.
+          sed -i \
+            's|install -Dm644 "emskin-bar"|install -Dm755 "emskin-bar"|' \
+            "$CARGO_TARGET_DIR/cargo-aur/PKGBUILD"
           rm LICENSE emskin-bar
 
       - name: Get version
@@ -71,8 +82,8 @@ jobs:
         with:
           name: emskin-x86_64
           path: |
-            crates/emskin/target/cargo-aur/emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
-            crates/emskin/target/cargo-aur/PKGBUILD
+            target/cargo-aur/emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
+            target/cargo-aur/PKGBUILD
 
   release:
     name: Create Release
