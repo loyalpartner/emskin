@@ -57,7 +57,7 @@ cargo install --git https://github.com/emskin/emskin.git
 
 # 方式二：手动编译
 git clone https://github.com/emskin/emskin.git
-cd emskin/emskin && cargo build --release
+cd emskin && cargo build --release
 ```
 
 ## 快速开始

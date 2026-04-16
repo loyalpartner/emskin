@@ -57,7 +57,7 @@ cargo install --git https://github.com/emskin/emskin.git
 
 # Option 2: build from source
 git clone https://github.com/emskin/emskin.git
-cd emskin/emskin && cargo build --release
+cd emskin && cargo build --release
 ```
 
 ## Quick Start

@@ -62,7 +62,7 @@ Top-of-screen pill bar showing workspace buttons + centered title. Currently liv
 2. `impl MyOverlay { pub fn new(); pub fn typed_setter(...) }`
 3. `impl effect_core::Effect for MyOverlay { ... }`
 4. Add `pub mod my_plugin;` to `lib.rs`
-5. In `emskin/src/state.rs::EmskinState::new`, register via the helper:
+5. In `crates/emskin/src/state.rs::EmskinState::new`, register via the helper:
    ```rust
    let my = register_overlay(&mut effect_chain, my_plugin::MyOverlay::new());
    ```

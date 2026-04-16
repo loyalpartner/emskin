@@ -92,7 +92,7 @@
 - `other-frame` (C-x 5 o): advised `:around` to send `switch_workspace` IPC before calling original. Does NOT resync after — `on-workspace-switched` handles it when compositor confirms
 - Bar height transition (1↔2 workspaces): `resize_all_emacs_for_bar()` must resize ALL workspace Emacs frames (active + inactive) and re-send `SurfaceSize` IPC
 - Buffer-space coordinates: anything writing into a `MemoryRenderBuffer` uses `Point<i32, Buffer>` / `Size<i32, Buffer>` smithay markers, not raw `i32` — prevents mixing Logical/Physical/Buffer in pixel-write hot paths (see `effect_plugins::measure::draw_text`, `effect_core::render::paint_buffer`)
-- Release workflow: `emskin/Cargo.toml` `version` MUST equal the git tag minus the `v` prefix — `cargo aur` bakes `pkgver` into the PKGBUILD source URL (`releases/download/v$pkgver/...`). Mismatch → AUR PKGBUILD downloads a stale/missing tarball. Bump Cargo.toml version before tagging
+- Release workflow: `crates/emskin/Cargo.toml` `version` MUST equal the git tag minus the `v` prefix — `cargo aur` bakes `pkgver` into the PKGBUILD source URL (`releases/download/v$pkgver/...`). Mismatch → AUR PKGBUILD downloads a stale/missing tarball. Bump Cargo.toml version before tagging. Note: cargo-aur 0.x does not support `version.workspace = true`, so this crate keeps the literal value
 - AUR publish action pinned to `KSXGitHub/github-actions-deploy-aur@v4.1.2` or newer — v4.1.1 breaks on recent Arch `util-linux` with `bash: --command: invalid option`
 - Verifying AUR state: `https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=<pkg>` is cached — use `git clone https://aur.archlinux.org/<pkg>.git` to read the actual repo head
 

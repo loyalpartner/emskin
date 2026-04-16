@@ -4,8 +4,8 @@ use smithay::reexports::wayland_server::Display;
 
 use emskin::{clipboard, clipboard_x11, cursor_x11, ipc, state, EmskinState};
 
-static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../elisp");
-static DEMO_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../demo");
+static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../elisp");
+static DEMO_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../demo");
 
 /// Nested Wayland compositor for Emacs Application Framework.
 #[derive(Parser, Debug)]

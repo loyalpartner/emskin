@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        working-directory: emskin
+        working-directory: crates/emskin
         run: |
           rustup default stable
           rustup show
@@ -44,14 +44,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            emskin/target
-          key: arch-x86_64-release-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'emskin/Cargo.toml', 'effect-core/Cargo.toml', 'effect-plugins/Cargo.toml') }}
+            crates/emskin/target
+          key: arch-x86_64-release-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/emskin/Cargo.toml', 'crates/effect-core/Cargo.toml', 'crates/effect-plugins/Cargo.toml') }}
           restore-keys: arch-x86_64-release-
 
       - name: Build and package with cargo-aur
-        working-directory: emskin
+        working-directory: crates/emskin
         run: |
-          cp ../LICENSE .
+          cp ../../LICENSE .
           cargo aur
           rm LICENSE
 
@@ -64,8 +64,8 @@ jobs:
         with:
           name: emskin-x86_64
           path: |
-            emskin/target/cargo-aur/emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
-            emskin/target/cargo-aur/PKGBUILD
+            crates/emskin/target/cargo-aur/emskin-${{ steps.version.outputs.version }}-x86_64.tar.gz
+            crates/emskin/target/cargo-aur/PKGBUILD
 
   release:
     name: Create Release

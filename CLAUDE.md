@@ -4,10 +4,15 @@ This repository is a Cargo workspace with three crates:
 
 ```
 emskin/                          # workspace root
-├── Cargo.toml                   # [workspace]
-├── effect-core/                 # rendering framework + Effect trait
-├── effect-plugins/              # built-in visual overlays
-└── emskin/                      # compositor (window manager) + binary
+├── Cargo.toml                   # [workspace] members = ["crates/*"]
+├── crates/
+│   ├── effect-core/             # rendering framework + Effect trait
+│   ├── effect-plugins/          # built-in visual overlays
+│   └── emskin/                  # compositor (window manager) + binary
+├── elisp/                       # Emacs-side client (shipped embedded)
+├── demo/                        # demo scripts (shipped embedded)
+├── .github/workflows/           # release.yml runs cargo-aur in crates/emskin
+└── ...
 ```
 
 ## Dep graph (hard boundary)
@@ -54,7 +59,7 @@ Each plugin struct implements `effect_core::Effect` (purely visual) **and** expo
 2. **Plugins do not know about IPC / workspaces / Emacs connection.** emskin pushes state to them by calling their typed setters directly.
 3. **Effect trait has no input methods.** Clicks are hit-tested in emskin's `input.rs` against the overlays' typed `click_at`.
 4. **`EffectHandle<T>` is the bridge**: same `Rc<RefCell<T>>` serves as typed handle in emskin + `Box<dyn Effect>` in the chain.
-5. **Cargo-aur stays on the `emskin` crate** (`crates.io/cargo-aur` runs in `emskin/emskin/`). Version number flows from `[workspace.package]`.
+5. **Cargo-aur runs in `crates/emskin/`**. Because cargo-aur 0.x does not support `version.workspace = true`, `crates/emskin/Cargo.toml` keeps literal `version` / `edition` / `license` / `repository` / `authors` values (commented in the file). Other crates inherit from `[workspace.package]`.
 
 ## `chain_position` assignments
 
@@ -69,7 +74,7 @@ Effects with higher positions appear earlier in the custom-element Vec (which is
 
 ## When to look where
 
-- "How does X render?" → `effect-core` (render_workspace) + the plugin's `paint`
-- "How do I toggle Y?" → the plugin's typed setter, called from `emskin/src/ipc/dispatch.rs`
-- "Why does click Z absorb?" → `emskin/src/input.rs` (window-manager-owned hit-testing)
+- "How does X render?" → `crates/effect-core/` (render_workspace) + the plugin's `paint`
+- "How do I toggle Y?" → the plugin's typed setter, called from `crates/emskin/src/ipc/dispatch.rs`
+- "Why does click Z absorb?" → `crates/emskin/src/input.rs` (window-manager-owned hit-testing)
 - Per-crate architectural notes are in that crate's own `CLAUDE.md`.
