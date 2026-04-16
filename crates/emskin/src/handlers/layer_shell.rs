@@ -29,6 +29,7 @@ impl WlrLayerShellHandler for EmskinState {
         };
 
         let mut map = layer_map_for_output(&output);
+        let zone_before = map.non_exclusive_zone();
         if let Err(e) = map.map_layer(&desktop_layer) {
             tracing::warn!("layer_shell: map_layer failed: {e}");
             desktop_layer.layer_surface().send_close();
@@ -61,31 +62,43 @@ impl WlrLayerShellHandler for EmskinState {
             state.size = Some(output_logical_size);
         });
         desktop_layer.layer_surface().send_pending_configure();
+        let zone_after = map.non_exclusive_zone();
         drop(map);
 
-        // A new layer surface may claim exclusive space (e.g. the external
-        // workspace bar at the top). Recompute Emacs frame geometry against
-        // the updated non-exclusive zone and push SurfaceSize to elisp.
-        self.relayout_emacs();
+        // Only relayout when the non-exclusive zone actually shifts —
+        // an overlay launcher (zofi / rofi) with exclusive_zone=0 must
+        // not cause Emacs to resize just by appearing.
+        if zone_before != zone_after {
+            self.relayout_emacs();
+        } else {
+            self.needs_redraw = true;
+        }
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
-        if let Some(output) = self.space.outputs().next().cloned() {
+        let (zone_before, zone_after) = if let Some(output) = self.space.outputs().next().cloned() {
             let mut map = layer_map_for_output(&output);
+            let before = map.non_exclusive_zone();
             let found = map
                 .layer_for_surface(surface.wl_surface(), WindowSurfaceType::TOPLEVEL)
                 .cloned();
             if let Some(layer) = found {
                 map.unmap_layer(&layer);
             }
+            let after = map.non_exclusive_zone();
             drop(map);
-        }
+            (before, after)
+        } else {
+            (Default::default(), Default::default())
+        };
 
         tracing::info!("layer_shell: surface destroyed");
 
-        // Layer surface gave back its exclusive space — Emacs can reclaim it.
-        // (Also sets needs_redraw.)
-        self.relayout_emacs();
+        if zone_before != zone_after {
+            self.relayout_emacs();
+        } else {
+            self.needs_redraw = true;
+        }
 
         // Restore focus to whatever had it before the layer surface took over.
         // Check is_alive() to handle sequential layer surfaces where the saved

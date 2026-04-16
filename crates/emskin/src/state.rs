@@ -748,11 +748,10 @@ impl EmskinState {
         // Tell Emacs its new surface size so elisp's sync path picks up the
         // new window-body dimensions. Wire format unchanged — Emacs only
         // cares about its own window size, not whether a bar sits above.
-        self.ipc
-            .send(crate::ipc::OutgoingMessage::SurfaceSize {
-                width: geo.size.w,
-                height: geo.size.h,
-            });
+        self.ipc.send(crate::ipc::OutgoingMessage::SurfaceSize {
+            width: geo.size.w,
+            height: geo.size.h,
+        });
 
         self.needs_redraw = true;
     }

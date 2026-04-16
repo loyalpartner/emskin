@@ -281,4 +281,3 @@ fn cleanup_dead_apps(state: &mut EmskinState) {
         }
     }
 }
-

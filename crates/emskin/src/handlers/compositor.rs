@@ -77,23 +77,28 @@ impl CompositorHandler for EmskinState {
                 .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
                 .cloned();
             if let Some(ref layer) = layer {
-                let changed = map.arrange();
+                // Capture the non-exclusive zone *before* and *after*
+                // arrange so we only relayout Emacs when the usable area
+                // actually shifts. `arrange()` returns true on any
+                // layout change — including a non-exclusive overlay
+                // (rofi / zofi launcher) simply moving into place,
+                // which must *not* trigger an Emacs resize.
+                let zone_before = map.non_exclusive_zone();
+                map.arrange();
+                let zone_after = map.non_exclusive_zone();
                 drop(map);
-                if changed {
-                    tracing::debug!("layer surface rearranged");
-                }
                 layer.layer_surface().send_pending_configure();
 
                 let needs_focus = layer.can_receive_keyboard_focus();
                 let wl = layer.wl_surface().clone();
-                Some((needs_focus, wl, changed))
+                Some((needs_focus, wl, zone_before != zone_after))
             } else {
                 None
             }
         } else {
             None
         };
-        if let Some((needs_focus, wl, arrange_changed)) = layer_focus {
+        if let Some((needs_focus, wl, zone_changed)) = layer_focus {
             if needs_focus {
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     if keyboard.current_focus().as_ref() != Some(&wl) {
@@ -105,10 +110,11 @@ impl CompositorHandler for EmskinState {
                     }
                 }
             }
-            // If the layer map rearranged (e.g. exclusive_zone changed), the
-            // non-exclusive zone that Emacs tiles into has shifted — resize
-            // every Emacs frame and push SurfaceSize to elisp.
-            if arrange_changed {
+            // Only relayout when the non-exclusive zone — the rect Emacs
+            // tiles into — actually changes. Launchers with no exclusive
+            // zone commit frequently while fuzzing their input and must
+            // not cause Emacs to resize on every keystroke.
+            if zone_changed {
                 self.relayout_emacs();
             }
             return;
