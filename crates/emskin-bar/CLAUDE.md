@@ -38,6 +38,9 @@ SCTK doesn't provide bindings for that protocol. The three interfaces (`manager`
 
 ## Gotchas
 
+- ext-workspace-v1 `Removed` event: the server destroys the handle immediately after emitting this — the client must NOT call `handle.destroy()` afterwards (triggers protocol error). Just filter it out of your local lists.
+- Any event carrying a `new_id` (here: manager's `workspace_group` @ opcode 0 and `workspace` @ opcode 1) requires `event_created_child!` in the Dispatch impl, or wayland-client panics at dispatch time. Staging protocols don't export `EVT_*` constants — hardcode opcodes from the XML.
+- Frame-callback-driven redraw is a trap: if `frame()` skips `draw()` (nothing changed), no next callback gets scheduled, and any later state event has no way to trigger a repaint. Always `draw()` directly on state change (configure, `update_visibility` with `configured_once`), and treat frame callbacks only as a pacing hint.
 - Workspace wire id is a string like `"emskin-ws-3"` — `parse_id` takes the last `-`-separated token. Non-numeric ids fall through to 0 and still render.
 - `SlotPool::new(size, &shm)` panics if shm doesn't advertise argb8888 — emskin does, so we assert rather than handle.
 - `blocking_dispatch` returns `Err` on compositor disconnect (socket closed). `main`'s `?` then propagates and we exit — no need for an explicit SIGTERM from emskin.

@@ -9,7 +9,7 @@
 
 use cosmic_text::{Attrs, Family, Metrics, Shaping, Weight};
 use smithay_client_toolkit::shell::WaylandSurface;
-use wayland_client::{protocol::wl_shm, QueueHandle};
+use wayland_client::protocol::wl_shm;
 
 use crate::state::BarState;
 
@@ -43,7 +43,7 @@ const FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT: f32 = 16.0;
 
 impl BarState {
-    pub(crate) fn draw(&mut self, qh: &QueueHandle<Self>) {
+    pub(crate) fn draw(&mut self) {
         let Some(layer) = self.layer.clone() else {
             return;
         };
@@ -109,7 +109,6 @@ impl BarState {
 
         let surface = layer.wl_surface();
         surface.damage_buffer(0, 0, width as i32, height as i32);
-        surface.frame(qh, surface.clone());
         if buffer.attach_to(surface).is_ok() {
             layer.commit();
         }

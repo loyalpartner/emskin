@@ -185,9 +185,9 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for BarState {
                 entry.active = new_active;
             }
             Event::Removed => {
-                // Retain-filter below removes the entry from whichever list
-                // it lives in; destroy the server resource first.
-                entry.handle.destroy();
+                // Protocol: the server destroys the handle immediately after
+                // sending `removed`, so the client MUST NOT issue further
+                // requests (including `destroy`) on it. Just forget it.
                 let handle_clone = proxy.clone();
                 state.pending_workspaces.retain(|w| w.handle != handle_clone);
                 state.workspaces.retain(|w| w.handle != handle_clone);
@@ -212,4 +212,24 @@ fn find_entry_mut<'a>(
         return state.workspaces.get_mut(i);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn parses_emskin_wire_format() {
+        assert_eq!(parse_id("emskin-ws-3"), 3);
+        assert_eq!(parse_id("emskin-ws-42"), 42);
+    }
+
+    #[test]
+    fn falls_back_to_zero_for_unknown_formats() {
+        assert_eq!(parse_id(""), 0);
+        assert_eq!(parse_id("foo"), 0);
+        assert_eq!(parse_id("workspace"), 0);
+        // Takes the last dash-separated token, so this is intentional:
+        assert_eq!(parse_id("custom-7"), 7);
+    }
 }

@@ -67,6 +67,7 @@ Standalone Wayland client binary. Anchors a `zwlr-layer-shell-v1` surface at the
 4. **`EffectHandle<T>` is the bridge**: same `Rc<RefCell<T>>` serves as typed handle in emskin + `Box<dyn Effect>` in the chain.
 5. **Compositor is self-adaptive via layer-shell.** Emacs's geometry is `EmskinState::usable_area()` = `LayerMap::non_exclusive_zone()`. There is no `bar_height()` or "bar is enabled" concept in the compositor — if any layer surface declares `exclusive_zone`, the non-exclusive rect shrinks and `relayout_emacs()` pushes the new size to Emacs. `emskin-bar` is just one such client; swapping it for waybar works out of the box.
 6. **Cargo-aur runs in `crates/emskin/`**. Because cargo-aur 0.x does not support `version.workspace = true`, `crates/emskin/Cargo.toml` keeps literal `version` / `edition` / `license` / `repository` / `authors` values (commented in the file). Other crates inherit from `[workspace.package]`. The release workflow pre-builds `emskin-bar` and copies it into `crates/emskin/` so `[package.metadata.aur].files` can ship it next to the main binary.
+7. **`cargo run -p emskin` does not rebuild sibling binaries.** emskin-bar is not in emskin's dep graph, so `-p` targeting won't pick up bar changes. `default-members` ensures plain `cargo build` / `cargo run` rebuild both, but if you pass `-p`, also run `cargo build -p emskin-bar` explicitly.
 
 ## `chain_position` assignments
 

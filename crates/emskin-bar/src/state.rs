@@ -32,7 +32,6 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 use wayland_protocols::ext::workspace::v1::client::ext_workspace_manager_v1::ExtWorkspaceManagerV1;
-use wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1;
 
 use crate::render::{BAR_HEIGHT, PILL_H_PAD};
 use crate::workspace::WorkspaceEntry;
@@ -49,7 +48,6 @@ pub struct BarState {
 
     // --- Seat / output ---
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
-    pub(crate) pointer_pos: (f64, f64),
 
     // --- Text rendering ---
     pub(crate) font_system: FontSystem,
@@ -70,8 +68,7 @@ pub struct BarState {
     pub(crate) surface_size: Option<(u32, u32)>,
     pub(crate) configured_once: bool,
 
-    // --- Redraw / lifecycle ---
-    pub(crate) needs_redraw: bool,
+    // --- Lifecycle ---
     pub(crate) exit: bool,
 }
 
@@ -102,7 +99,6 @@ impl BarState {
             layer_shell,
             pool,
             pointer: None,
-            pointer_pos: (0.0, 0.0),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             workspace_manager,
@@ -111,7 +107,6 @@ impl BarState {
             layer: None,
             surface_size: None,
             configured_once: false,
-            needs_redraw: false,
             exit: false,
         })
     }
@@ -126,18 +121,20 @@ impl BarState {
 
     /// Decide whether a layer surface should exist right now; map or unmap
     /// accordingly. Called after every committed workspace snapshot.
+    ///
+    /// Redraws are issued directly rather than flagging for a frame
+    /// callback: callbacks are only scheduled by a prior draw(), so if we
+    /// ever skip drawing we stop getting woken up. Commit immediately and
+    /// let the compositor pace us — configure covers the not-yet-sized case.
     pub(crate) fn update_visibility(&mut self, qh: &QueueHandle<Self>) {
         let should_show = self.workspaces.len() >= 2;
         match (self.layer.is_some(), should_show) {
             (false, true) => self.create_layer(qh),
             (true, false) => self.destroy_layer(),
-            // Draw directly instead of waiting for a frame callback:
-            // we only get a frame callback if the previous draw scheduled
-            // one, and we stop scheduling them when there's no redraw to
-            // do — so a frame callback may not be pending when state
-            // changes arrive. Commit now; draw() re-arms the callback.
-            (true, true) if self.configured_once => self.draw(qh),
-            (true, true) => self.needs_redraw = true,
+            (true, true) if self.configured_once => self.draw(),
+            (true, true) => {
+                // Not configured yet — the first configure will draw.
+            }
             (false, false) => {}
         }
     }
@@ -172,10 +169,7 @@ impl BarState {
     // ---------------------------------------------------------------------
 
     fn handle_click(&mut self, pos: (f64, f64)) {
-        let Some((width, _)) = self.surface_size else {
-            return;
-        };
-        let Some(hit) = hit_test(&self.workspaces, pos, width as i32) else {
+        let Some(hit) = hit_test(&self.workspaces, pos) else {
             return;
         };
         tracing::debug!("click activating workspace id={}", hit.id);
@@ -188,31 +182,16 @@ impl BarState {
 // Hit-test: uses the cached hit_rect from the last render.
 // -------------------------------------------------------------------------
 
-struct HitResult<'a> {
-    id: u64,
-    handle: &'a ExtWorkspaceHandleV1,
-}
-
-fn hit_test<'a>(
-    workspaces: &'a [WorkspaceEntry],
-    pos: (f64, f64),
-    _bar_width: i32,
-) -> Option<HitResult<'a>> {
+fn hit_test(workspaces: &[WorkspaceEntry], pos: (f64, f64)) -> Option<&WorkspaceEntry> {
     let (px, py) = pos;
-    for ws in workspaces {
+    workspaces.iter().find(|ws| {
         let (x, y, w, h) = ws.hit_rect;
         let in_x = px >= x as f64 && px < (x + w) as f64;
         // Y tolerance — layer-shell buffer origin is at 0. Keep a loose
         // check so a click anywhere inside the pill row lands.
         let in_y = py >= (y - PILL_H_PAD) as f64 && py < (y + h + PILL_H_PAD) as f64;
-        if in_x && in_y {
-            return Some(HitResult {
-                id: ws.id,
-                handle: &ws.handle,
-            });
-        }
-    }
-    None
+        in_x && in_y
+    })
 }
 
 // =========================================================================
@@ -241,14 +220,13 @@ impl CompositorHandler for BarState {
     fn frame(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        if self.needs_redraw {
-            self.needs_redraw = false;
-            self.draw(qh);
-        }
+        // Frame callbacks are pacing hints only; we draw on state changes.
+        // Intentionally empty — re-drawing here would double-render and
+        // skipping draw() elsewhere would strand the redraw cycle.
     }
 
     fn surface_enter(
@@ -335,15 +313,9 @@ impl PointerHandler for BarState {
             } else {
                 continue;
             }
-            match event.kind {
-                PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
-                    self.pointer_pos = event.position;
-                }
-                // 0x110 = BTN_LEFT from linux/input-event-codes.h.
-                PointerEventKind::Press { button: 0x110, .. } => {
-                    self.handle_click(event.position);
-                }
-                _ => {}
+            // 0x110 = BTN_LEFT from linux/input-event-codes.h.
+            if let PointerEventKind::Press { button: 0x110, .. } = event.kind {
+                self.handle_click(event.position);
             }
         }
     }
@@ -361,7 +333,7 @@ impl LayerShellHandler for BarState {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
@@ -373,7 +345,7 @@ impl LayerShellHandler for BarState {
         self.configured_once = true;
         // Always redraw on configure — the compositor is waiting for us to
         // attach a buffer of the configured size.
-        self.draw(qh);
+        self.draw();
     }
 }
 
