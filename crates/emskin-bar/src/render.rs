@@ -81,13 +81,18 @@ impl BarState {
             let ph = height as i32 - 2 * PILL_H_PAD / 3;
             let py = (height as i32 - ph) / 2;
             let bg = if ws.active { PILL_BG_ACTIVE } else { PILL_BG };
-            let fg = if ws.active {
-                PILL_FG_ACTIVE
-            } else {
-                PILL_FG
-            };
+            let fg = if ws.active { PILL_FG_ACTIVE } else { PILL_FG };
 
-            fill_rect(canvas, width as i32, height as i32, cursor_x, py, pw, ph, bg);
+            fill_rect(
+                canvas,
+                width as i32,
+                height as i32,
+                cursor_x,
+                py,
+                pw,
+                ph,
+                bg,
+            );
 
             // Centre the text vertically/horizontally in the pill.
             draw_text(
@@ -168,7 +173,9 @@ fn measure_text(
     let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
     let mut buf = cosmic_text::Buffer::new(font_system, metrics);
     buf.set_size(font_system, Some(f32::INFINITY), Some(f32::INFINITY));
-    let attrs = Attrs::new().family(Family::SansSerif).weight(Weight::MEDIUM);
+    let attrs = Attrs::new()
+        .family(Family::SansSerif)
+        .weight(Weight::MEDIUM);
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
@@ -196,7 +203,9 @@ fn draw_text(
     let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
     let mut buf = cosmic_text::Buffer::new(font_system, metrics);
     buf.set_size(font_system, Some(f32::INFINITY), Some(f32::INFINITY));
-    let attrs = Attrs::new().family(Family::SansSerif).weight(Weight::MEDIUM);
+    let attrs = Attrs::new()
+        .family(Family::SansSerif)
+        .weight(Weight::MEDIUM);
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 

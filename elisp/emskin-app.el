@@ -31,12 +31,21 @@
       (emskin--on-focus-view (gethash "window_id" msg)
                                  (gethash "view_id" msg)))
      ((string= type "surface_size")
-      (let* ((h (gethash "height" msg))
-             (offset (max 0 (- h (frame-pixel-height)))))
+      (let* ((w (gethash "width" msg))
+             (h (gethash "height" msg))
+             (frame-h (frame-pixel-height))
+             ;; Only seed header-offset once — it's the GTK external
+             ;; menu-bar / tool-bar height, which is a property of the
+             ;; Emacs frame, NOT of the compositor's surface. Recomputing
+             ;; from `h - frame-pixel-height` on every resize races with
+             ;; GTK's own resize processing: a compositor bar appearing /
+             ;; disappearing (C-x 5 1 / 5 2) would briefly make frame-h
+             ;; stale and shift apps by the bar height.
+             (offset (or emskin--header-offset
+                         (max 0 (- h frame-h)))))
         (setq emskin--header-offset offset)
-        (message "emskin: surface=%sx%s bars=%dpx"
-                 (gethash "width" msg) h offset)
-        ;; Re-sync EAF windows now that we have the correct offset.
+        (message "emskin: surface=%sx%s bars=%dpx" w h offset)
+        ;; Re-sync EAF windows with the updated surface dims.
         (dolist (frame (frame-list))
           (emskin--sync-frame frame))))
      ((string= type "workspace_created")

@@ -95,7 +95,9 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for BarState {
                 // New workspaces land in `pending` and graduate to the
                 // committed list on the next `done`. Between batches the
                 // committed list receives id/name/state updates directly.
-                state.pending_workspaces.push(WorkspaceEntry::new(workspace));
+                state
+                    .pending_workspaces
+                    .push(WorkspaceEntry::new(workspace));
             }
             Event::Done => {
                 state.workspaces.append(&mut state.pending_workspaces);
@@ -180,7 +182,12 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for BarState {
             } => {
                 let new_active = flags.contains(WsState::Active);
                 if new_active != entry.active {
-                    tracing::debug!("workspace {} active {} → {}", entry.id, entry.active, new_active);
+                    tracing::debug!(
+                        "workspace {} active {} → {}",
+                        entry.id,
+                        entry.active,
+                        new_active
+                    );
                 }
                 entry.active = new_active;
             }
@@ -189,7 +196,9 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for BarState {
                 // sending `removed`, so the client MUST NOT issue further
                 // requests (including `destroy`) on it. Just forget it.
                 let handle_clone = proxy.clone();
-                state.pending_workspaces.retain(|w| w.handle != handle_clone);
+                state
+                    .pending_workspaces
+                    .retain(|w| w.handle != handle_clone);
                 state.workspaces.retain(|w| w.handle != handle_clone);
             }
             _ => {}

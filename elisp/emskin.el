@@ -63,7 +63,11 @@ header-line/mode-line, and the echo area with coordinates and sizes."
 
 (defvar emskin--header-offset nil
   "Pixel height of external GTK bars (menu-bar + tool-bar).
-Computed once from compositor-reported surface height.")
+Seeded once on the first compositor SurfaceSize event and kept
+constant thereafter — it's a property of the Emacs GTK frame, not of
+the compositor's surface, so re-measuring on every resize would race
+with GTK and break app placement when a layer-shell bar appears or
+disappears.")
 
 (defvar-local emskin--window-id nil
   "emskin window_id for the embedded app in this buffer.")
