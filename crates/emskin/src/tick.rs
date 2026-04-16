@@ -3,7 +3,7 @@
 use smithay::reexports::wayland_server::Resource;
 
 use crate::ipc::OutgoingMessage;
-use crate::state::{self, EmskinState, Workspace};
+use crate::state::{EmskinState, Workspace};
 
 /// Called once per event loop iteration. Handles workspace lifecycle,
 /// IPC dispatch, clipboard events, and pending geometry timeouts.
@@ -133,9 +133,6 @@ fn process_pending_toplevels(state: &mut EmskinState) {
                 }
             }
 
-            // Resize existing Emacs frames for bar (1→2 workspace transition).
-            resize_all_emacs_for_bar(state);
-
             state.ipc.send(OutgoingMessage::WorkspaceCreated {
                 workspace_id: ws_id,
             });
@@ -188,8 +185,6 @@ fn detect_dead_workspaces(state: &mut EmskinState) {
         tracing::info!("workspace {ws_id} destroyed (Emacs frame died)");
     }
     if had_dead {
-        // Bar might have disappeared (2→1 workspace) — resize Emacs back to fullscreen.
-        resize_all_emacs_for_bar(state);
         state.needs_redraw = true;
     }
 
@@ -277,31 +272,3 @@ fn cleanup_dead_apps(state: &mut EmskinState) {
     }
 }
 
-/// Resize and reposition all Emacs frames to account for bar height changes.
-/// Called when workspace count transitions (1→2 or 2→1).
-pub fn resize_all_emacs_for_bar(state: &mut EmskinState) {
-    let Some(geo) = state.emacs_geometry() else {
-        return;
-    };
-    tracing::info!(
-        "bar transition: emacs geometry = ({},{}) {}x{}",
-        geo.loc.x,
-        geo.loc.y,
-        geo.size.w,
-        geo.size.h,
-    );
-
-    state::resize_emacs_in_space(
-        &mut state.space,
-        &state.emacs_surface.clone(),
-        &state.emacs_x11_window.clone(),
-        geo,
-    );
-    for ws in state.inactive_workspaces.values_mut() {
-        state::resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
-    }
-
-    // Do NOT send SurfaceSize here — the compositor window size hasn't
-    // changed, only the internal bar/Emacs split. SurfaceSize is sent by
-    // the winit resize handler and xdg_shell initial configure.
-}

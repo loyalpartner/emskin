@@ -86,14 +86,14 @@ impl CompositorHandler for EmskinState {
 
                 let needs_focus = layer.can_receive_keyboard_focus();
                 let wl = layer.wl_surface().clone();
-                Some((needs_focus, wl))
+                Some((needs_focus, wl, changed))
             } else {
                 None
             }
         } else {
             None
         };
-        if let Some((needs_focus, wl)) = layer_focus {
+        if let Some((needs_focus, wl, arrange_changed)) = layer_focus {
             if needs_focus {
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     if keyboard.current_focus().as_ref() != Some(&wl) {
@@ -104,6 +104,12 @@ impl CompositorHandler for EmskinState {
                         tracing::debug!("layer surface received keyboard focus");
                     }
                 }
+            }
+            // If the layer map rearranged (e.g. exclusive_zone changed), the
+            // non-exclusive zone that Emacs tiles into has shifted — resize
+            // every Emacs frame and push SurfaceSize to elisp.
+            if arrange_changed {
+                self.relayout_emacs();
             }
             return;
         }

@@ -62,7 +62,11 @@ impl WlrLayerShellHandler for EmskinState {
         });
         desktop_layer.layer_surface().send_pending_configure();
         drop(map);
-        self.needs_redraw = true;
+
+        // A new layer surface may claim exclusive space (e.g. the external
+        // workspace bar at the top). Recompute Emacs frame geometry against
+        // the updated non-exclusive zone and push SurfaceSize to elisp.
+        self.relayout_emacs();
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
@@ -78,7 +82,10 @@ impl WlrLayerShellHandler for EmskinState {
         }
 
         tracing::info!("layer_shell: surface destroyed");
-        self.needs_redraw = true;
+
+        // Layer surface gave back its exclusive space — Emacs can reclaim it.
+        // (Also sets needs_redraw.)
+        self.relayout_emacs();
 
         // Restore focus to whatever had it before the layer surface took over.
         // Check is_alive() to handle sequential layer surfaces where the saved

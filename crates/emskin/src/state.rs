@@ -713,6 +713,46 @@ impl EmskinState {
     }
 }
 
+impl EmskinState {
+    /// Reposition + resize all Emacs frames (active + inactive workspaces) to
+    /// match the current non-exclusive zone, and broadcast the new size to
+    /// elisp. Call whenever layer surfaces claim/release space (new layer
+    /// mapped, layer destroyed, exclusive_zone changed on commit).
+    pub fn relayout_emacs(&mut self) {
+        let Some(geo) = self.emacs_geometry() else {
+            return;
+        };
+        tracing::debug!(
+            "relayout_emacs: usable area ({},{}) {}x{}",
+            geo.loc.x,
+            geo.loc.y,
+            geo.size.w,
+            geo.size.h,
+        );
+
+        // Active workspace's Emacs surface lives in self.space.
+        let active_emacs = self.emacs_surface.clone();
+        let active_x11 = self.emacs_x11_window.clone();
+        resize_emacs_in_space(&mut self.space, &active_emacs, &active_x11, geo);
+
+        // Inactive workspaces each hold their own space + Emacs.
+        for ws in self.inactive_workspaces.values_mut() {
+            resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, &ws.emacs_x11_window, geo);
+        }
+
+        // Tell Emacs its new surface size so elisp's sync path picks up the
+        // new window-body dimensions. Wire format unchanged — Emacs only
+        // cares about its own window size, not whether a bar sits above.
+        self.ipc
+            .send(crate::ipc::OutgoingMessage::SurfaceSize {
+                width: geo.size.w,
+                height: geo.size.h,
+            });
+
+        self.needs_redraw = true;
+    }
+}
+
 /// Resize and reposition the Emacs window in a given space.
 /// Handles both Wayland (pgtk) and X11 (gtk3 via XWayland) paths.
 pub fn resize_emacs_in_space(
