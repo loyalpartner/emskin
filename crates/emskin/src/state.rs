@@ -169,6 +169,10 @@ pub struct EmskinState {
     /// Handle to the spawned Emacs process
     pub emacs_child: Option<std::process::Child>,
 
+    /// Handle to the spawned emskin-bar process (None = `--bar=none` or the
+    /// binary couldn't be located). Kept alive so it's reaped on shutdown.
+    pub bar_child: Option<std::process::Child>,
+
     /// Path to extracted elisp dir (for cleanup on exit).
     pub elisp_dir: Option<std::path::PathBuf>,
 
@@ -338,6 +342,7 @@ impl EmskinState {
             emacs_x11_window: None,
             initial_size_settled: false,
             emacs_child: None,
+            bar_child: None,
             elisp_dir: None,
             pending_fullscreen: None,
             pending_maximize: None,

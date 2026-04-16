@@ -46,6 +46,13 @@ struct Cli {
     /// Standalone mode: auto-load built-in elisp without user config.
     #[arg(long)]
     standalone: bool,
+
+    /// How to launch the external workspace bar:
+    ///   * `auto`  — find `emskin-bar` next to this binary or on PATH (default)
+    ///   * `none`  — don't launch a bar (user manages their own / doesn't want one)
+    ///   * `<path>` — launch the binary at an explicit path (e.g. waybar)
+    #[arg(long, default_value = "auto")]
+    bar: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -106,11 +113,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     start_xwayland(event_loop.handle(), &mut state);
 
+    // Launch the external workspace bar (if configured). Done after the
+    // Wayland socket exists so the child inherits WAYLAND_DISPLAY via the
+    // parent environment.
+    spawn_bar(&cli.bar, &mut state);
+
     event_loop.run(None, &mut state, emskin::tick::event_loop_tick)?;
 
     // Clean up Emacs child process
     if let Some(mut child) = state.emacs_child.take() {
         let _ = child.kill();
+        let _ = child.wait();
+    }
+    // Bar child: emskin's Wayland socket closes on exit, which makes the bar
+    // disconnect and exit on its own. We still reap explicitly to avoid a
+    // zombie if the bar is slow to shut down.
+    if let Some(mut child) = state.bar_child.take() {
         let _ = child.wait();
     }
 
@@ -200,6 +218,62 @@ fn spawn_child(
         Ok(child) => state.emacs_child = Some(child),
         Err(e) => tracing::error!("Failed to spawn '{command}': {e}"),
     }
+}
+
+/// Launch the external workspace bar according to the `--bar` flag.
+///
+/// `auto` looks first next to the emskin binary (same directory — matches
+/// the AUR package layout and the dev target dir), then falls back to PATH.
+/// `none` skips entirely. Any other value is treated as an explicit path —
+/// useful for wiring in a third-party bar like waybar.
+fn spawn_bar(mode: &str, state: &mut EmskinState) {
+    let binary: std::path::PathBuf = match mode {
+        "none" => {
+            tracing::info!("--bar=none: not launching a workspace bar");
+            return;
+        }
+        "auto" => match locate_bar_binary() {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    "--bar=auto: emskin-bar not found next to emskin or on PATH; \
+                     continuing without a workspace bar"
+                );
+                return;
+            }
+        },
+        explicit => std::path::PathBuf::from(explicit),
+    };
+
+    tracing::info!("Spawning workspace bar: {}", binary.display());
+    match std::process::Command::new(&binary).spawn() {
+        Ok(child) => state.bar_child = Some(child),
+        Err(e) => {
+            tracing::warn!("Failed to spawn bar {}: {e}", binary.display());
+        }
+    }
+}
+
+/// Locate `emskin-bar`: prefer the sibling binary next to the current
+/// executable, then fall back to whatever `which` finds on `PATH`.
+fn locate_bar_binary() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("emskin-bar");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    // PATH lookup. std has no helper — iterate manually.
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("emskin-bar");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn runtime_dir() -> String {
