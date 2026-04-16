@@ -39,17 +39,6 @@
         ;; Re-sync EAF windows now that we have the correct offset.
         (dolist (frame (frame-list))
           (emskin--sync-frame frame))))
-     ((string= type "skeleton_clicked")
-      (let ((kind (gethash "kind" msg ""))
-            (label (gethash "label" msg ""))
-            (x (gethash "x" msg 0))
-            (y (gethash "y" msg 0))
-            (w (gethash "w" msg 0))
-            (h (gethash "h" msg 0)))
-        (message "emskin skeleton: %s%s (%d,%d) %dx%d"
-                 kind
-                 (if (string-empty-p label) "" (format " [%s]" label))
-                 x y w h)))
      ((string= type "workspace_created")
       (emskin--on-workspace-created (gethash "workspace_id" msg)))
      ((string= type "workspace_switched")

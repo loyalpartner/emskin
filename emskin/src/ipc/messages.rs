@@ -117,14 +117,6 @@ pub enum OutgoingMessage {
     XWaylandReady {
         display: u32,
     },
-    /// User clicked on a skeleton overlay label. Emacs should echo the
-    /// inspected rect in the minibuffer (or wherever useful).
-    SkeletonClicked {
-        kind: String,
-        label: String,
-        #[serde(flatten)]
-        rect: IpcRect,
-    },
     /// A new workspace was created (new Emacs frame detected).
     WorkspaceCreated {
         workspace_id: u64,
