@@ -40,11 +40,19 @@ pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works via XWaylan
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S emskin-bin
+```
+
+### From source
+
 ```bash
 # Dependencies (Arch Linux)
 sudo pacman -S wayland libxkbcommon mesa
 
-# Option 1: cargo install (recommended)
+# Option 1: cargo install
 cargo install --git https://github.com/emskin/emskin.git
 
 # Option 2: build from source
