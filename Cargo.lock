@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "effect-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cosmic-text",
  "serde",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "effect-plugins"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cosmic-text",
  "effect-core",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "emskin"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bitflags 2.11.1",
  "clap",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "emskin-bar"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cosmic-text",
  "smithay-client-toolkit",

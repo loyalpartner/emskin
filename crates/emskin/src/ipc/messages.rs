@@ -58,6 +58,10 @@ pub enum IncomingMessage {
     SetMeasure {
         enabled: bool,
     },
+    /// Enable/disable the cursor trail effect.
+    SetCursorTrail {
+        enabled: bool,
+    },
     /// Set (and enable/disable) the skeleton overlay (frame layout inspector).
     /// When `enabled` is false, `rects` is ignored and the overlay is cleared.
     SetSkeleton {

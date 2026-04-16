@@ -119,6 +119,16 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
   (interactive)
   (customize-set-variable 'emskin-measure (not emskin-measure)))
 
+(defvar emskin--cursor-trail nil)
+
+(defun emskin-toggle-cursor-trail ()
+  "Toggle the cursor trail effect."
+  (interactive)
+  (setq emskin--cursor-trail (not emskin--cursor-trail))
+  (emskin--send `(("type" . "set_cursor_trail")
+                  ("enabled" . ,emskin--cursor-trail)))
+  (message "emskin: cursor trail %s" (if emskin--cursor-trail "ON" "OFF")))
+
 (defun emskin-open-app (app-name)
   "Launch embedded application APP-NAME (Python script in `emskin-demo-dir')."
   (interactive "sApp name: ")

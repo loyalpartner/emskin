@@ -208,6 +208,7 @@ pub struct EmskinState {
     pub measure: std::rc::Rc<std::cell::RefCell<effect_plugins::measure::MeasureOverlay>>,
     pub skeleton: std::rc::Rc<std::cell::RefCell<effect_plugins::skeleton::SkeletonOverlay>>,
     pub splash: std::rc::Rc<std::cell::RefCell<effect_plugins::splash::SplashScreen>>,
+    pub cursor_trail: std::rc::Rc<std::cell::RefCell<effect_plugins::cursor_trail::CursorTrail>>,
 
     /// Whether a skeleton label-click was swallowed — matching release must
     /// also be swallowed. Lives in the window manager, not the overlay.
@@ -291,6 +292,10 @@ impl EmskinState {
             &mut effect_chain,
             effect_plugins::measure::MeasureOverlay::new(),
         );
+        let cursor_trail = register_overlay(
+            &mut effect_chain,
+            effect_plugins::cursor_trail::CursorTrail::new(),
+        );
 
         Ok(Self {
             start_time,
@@ -355,6 +360,7 @@ impl EmskinState {
             measure,
             skeleton,
             splash,
+            cursor_trail,
             skeleton_click_absorbed: false,
             last_emacs_connected: false,
             cursor_status: CursorImageStatus::default_named(),
