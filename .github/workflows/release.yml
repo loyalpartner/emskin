@@ -88,41 +88,19 @@ jobs:
     name: Publish to AUR
     needs: release
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
     steps:
-      - name: Install dependencies
-        run: pacman -Syu --noconfirm && pacman -S --noconfirm --needed base-devel git openssh
-
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: emskin-x86_64
 
-      - name: Generate .SRCINFO
-        run: |
-          useradd -m builder
-          cp PKGBUILD /home/builder/
-          su builder -c 'cd ~ && makepkg --printsrcinfo' > .SRCINFO
-
-      - name: Push to AUR
-        env:
-          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$AUR_SSH_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          echo -e "Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur" > ~/.ssh/config
-
-          ssh -T aur@aur.archlinux.org || true
-          git clone ssh://aur@aur.archlinux.org/emskin-bin.git aur-repo
-          cp PKGBUILD .SRCINFO aur-repo/
-          cd aur-repo
-          git config user.name "Lee"
-          git config user.email "loyalpartner@163.com"
-          git add PKGBUILD .SRCINFO
-          git diff --cached --quiet || {
-            git commit -m "Update to v${GITHUB_REF_NAME#v}"
-            git push origin master
-          }
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: emskin-bin
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"
+          updpkgsums: true
