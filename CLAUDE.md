@@ -76,6 +76,7 @@ Standalone Wayland client binary. Anchors a `zwlr-layer-shell-v1` surface at the
 | overlay        | position | rationale |
 |----------------|----------|-----------|
 | `splash`       | 95       | Covers everything during startup |
+| `recorder`     | 90       | Recording indicator (red dot + MM:SS timer), also ends up burned into the captured video |
 | `skeleton`     | 85       | Debug overlay with labels |
 | `measure`      | 80       | Cursor measurement, visible when toggled |
 | `jelly_cursor` | 77       | Text-caret animation, sits above pointer trail |

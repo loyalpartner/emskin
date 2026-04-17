@@ -53,8 +53,30 @@
       (emskin--on-workspace-switched (gethash "workspace_id" msg)))
      ((string= type "workspace_destroyed")
       (emskin--on-workspace-destroyed (gethash "workspace_id" msg)))
+     ((string= type "recording_stopped")
+      (emskin--on-recording-stopped (gethash "path" msg "")
+                                    (gethash "frames_written" msg 0)
+                                    (gethash "duration_secs" msg 0.0)
+                                    (gethash "reason" msg "unknown")))
      (t
       (message "emskin: unknown message type %s" type)))))
+
+(defun emskin--on-recording-stopped (path frames duration reason)
+  "Handle a `recording_stopped' IPC: sync `emskin-record' and notify user.
+
+The compositor may auto-stop (resize / encoder error / replaced) without
+Emacs having asked, so we unconditionally flip `emskin-record' off here
+rather than assuming the elisp toggle is the single source of truth."
+  (when (boundp 'emskin-record)
+    (setq emskin-record nil))
+  (let ((tag (pcase reason
+               ("user" "done")
+               ("resize" "stopped (screen size changed)")
+               ("encoder_error" "stopped (encoder error)")
+               ("replaced" "stopped (superseded)")
+               (_ (format "stopped (%s)" reason)))))
+    (message "emskin: recording %s — %d frames, %.2fs → %s"
+             tag frames duration path)))
 
 ;; ---------------------------------------------------------------------------
 ;; Window lifecycle

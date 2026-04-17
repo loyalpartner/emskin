@@ -17,8 +17,10 @@
 //! program (`crates/emskin-bar/`) that talks to the compositor via
 //! `zwlr-layer-shell-v1` + `ext-workspace-v1`.
 
+pub mod bitmap_font;
 pub mod cursor_trail;
 pub mod jelly_cursor;
 pub mod measure;
+pub mod recorder;
 pub mod skeleton;
 pub mod splash;

@@ -57,6 +57,12 @@ Toggle with `emskin-toggle-jelly-cursor'.")
   "Fallback jelly color when the `cursor' face has no background set.
 Most themes set one, so this rarely shows.")
 
+(defvar emskin-record nil
+  "Non-nil while emskin is recording the composited output to a video file.
+Toggle with `emskin-toggle-record'.  Each start writes a fresh
+timestamped `.mp4' under `emskin-record-dir'.  `emskin-screenshot' is
+a separate one-shot PNG capture that works independently.")
+
 ;; ---------------------------------------------------------------------------
 ;; Shared internal state
 ;; ---------------------------------------------------------------------------
@@ -118,6 +124,7 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (require 'emskin-skeleton)
 (require 'emskin-cursor-trail)
 (require 'emskin-jelly)
+(require 'emskin-record)
 
 ;; ---------------------------------------------------------------------------
 ;; Config sync

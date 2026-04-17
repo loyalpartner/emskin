@@ -245,10 +245,57 @@ fn render_frame(
                 return;
             }
         }
+
+        // Screencast hook. Fills the PBO here while the winit EGL surface
+        // is still the current draw target; `map_texture` would detach it,
+        // so the PNG write is deferred to after `backend.submit` below.
+        state.recorder.capture_frame(
+            renderer,
+            &framebuffer,
+            output,
+            size,
+            state.start_time.elapsed(),
+        );
     }
 
     if let Err(e) = backend.submit(Some(&[damage])) {
         tracing::error!("frame submit failed: {e}");
+        return;
+    }
+
+    // PBO → CPU → sink (PNG or ffmpeg stdin). Safe to map here because
+    // swap_buffers already ran; `map_texture`'s make_current dance only
+    // affects the next frame, which will re-`bind()` anyway.
+    //
+    // When a recording completes (either because the user stopped it or
+    // because an internal condition like a framebuffer resize forced an
+    // auto-stop), `finalize` returns a `FinishEvent`. We ping Emacs with
+    // `RecordingStopped` so the elisp toggle flips back to nil even when
+    // the stop wasn't user-initiated.
+    if let Some(ev) = state.recorder.finalize(backend.renderer()) {
+        state
+            .ipc
+            .send(crate::ipc::OutgoingMessage::RecordingStopped {
+                path: ev.path.to_string_lossy().into_owned(),
+                frames_written: ev.frames_written,
+                duration_secs: ev.duration.as_secs_f64(),
+                reason: ev.reason.as_str().to_string(),
+            });
+    }
+
+    // Derive the overlay state from the recorder (single source of
+    // truth): regardless of what triggered start/stop — user IPC,
+    // auto-stop on resize, ffmpeg spawn failure, size mismatch — the
+    // dot stays in lockstep with whatever the recorder actually is.
+    let now = state.start_time.elapsed();
+    let overlay_at = state.recorder.overlay_started_at(now);
+    state.recorder_overlay.borrow_mut().set_active(overlay_at);
+
+    // Keep the render loop warm while a capture/recording is in progress —
+    // otherwise an idle compositor stops generating frames and the video
+    // would stall at whatever the last damage event was.
+    if state.recorder.wants_continuous_frames() {
+        state.needs_redraw = true;
     }
 }
 
