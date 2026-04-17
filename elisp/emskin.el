@@ -109,6 +109,7 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (require 'emskin-app)
 (require 'emskin-workspace)
 (require 'emskin-skeleton)
+(require 'emskin-jelly)
 
 ;; ---------------------------------------------------------------------------
 ;; Public API: launch apps

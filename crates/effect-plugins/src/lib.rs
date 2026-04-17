@@ -10,12 +10,15 @@
 //! - [`measure`] — Figma-style pixel inspector (crosshair + rulers)
 //! - [`skeleton`] — frame layout debug overlay (wireframes + clickable labels)
 //! - [`splash`] — startup animation, dismissed on Emacs connect
+//! - [`cursor_trail`] — elastic trailing animation behind the mouse cursor
+//! - [`jelly_cursor`] — holo-layer-style elastic animation of Emacs's text caret
 //!
 //! Workspace bar used to live here but was extracted into a standalone
 //! program (`crates/emskin-bar/`) that talks to the compositor via
 //! `zwlr-layer-shell-v1` + `ext-workspace-v1`.
 
 pub mod cursor_trail;
+pub mod jelly_cursor;
 pub mod measure;
 pub mod skeleton;
 pub mod splash;

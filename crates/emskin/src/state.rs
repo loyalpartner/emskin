@@ -209,6 +209,7 @@ pub struct EmskinState {
     pub skeleton: std::rc::Rc<std::cell::RefCell<effect_plugins::skeleton::SkeletonOverlay>>,
     pub splash: std::rc::Rc<std::cell::RefCell<effect_plugins::splash::SplashScreen>>,
     pub cursor_trail: std::rc::Rc<std::cell::RefCell<effect_plugins::cursor_trail::CursorTrail>>,
+    pub jelly_cursor: std::rc::Rc<std::cell::RefCell<effect_plugins::jelly_cursor::JellyCursor>>,
 
     /// Whether a skeleton label-click was swallowed — matching release must
     /// also be swallowed. Lives in the window manager, not the overlay.
@@ -296,6 +297,10 @@ impl EmskinState {
             &mut effect_chain,
             effect_plugins::cursor_trail::CursorTrail::new(),
         );
+        let jelly_cursor = register_overlay(
+            &mut effect_chain,
+            effect_plugins::jelly_cursor::JellyCursor::new(),
+        );
 
         Ok(Self {
             start_time,
@@ -361,6 +366,7 @@ impl EmskinState {
             skeleton,
             splash,
             cursor_trail,
+            jelly_cursor,
             skeleton_click_absorbed: false,
             last_emacs_connected: false,
             cursor_status: CursorImageStatus::default_named(),
@@ -421,6 +427,22 @@ impl EmskinState {
         let scale = output.current_scale().fractional_scale();
         let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
         Some(Rectangle::new((0, 0).into(), logical))
+    }
+
+    /// Translate an Emacs surface-local rect into canvas coordinates by
+    /// adding the current usable-area origin. Used by every IPC geometry
+    /// handler — a top-anchored layer surface (bar) shifts the origin and
+    /// all rects must track.
+    pub fn emacs_rect_to_canvas(
+        &self,
+        rect: crate::ipc::IpcRect,
+    ) -> Rectangle<i32, Logical> {
+        let crate::ipc::IpcRect { x, y, w, h } = rect;
+        let origin = self.emacs_geometry().map(|g| g.loc).unwrap_or_default();
+        Rectangle::new(
+            smithay::utils::Point::from((x + origin.x, y + origin.y)),
+            smithay::utils::Size::from((w, h)),
+        )
     }
 
     /// Rect available for tiled clients (Emacs) after subtracting exclusive
@@ -573,6 +595,12 @@ impl EmskinState {
             sk.clear();
         }
         self.skeleton_click_absorbed = false;
+        // Reset caret tracking so the jelly overlay doesn't animate from
+        // the previous workspace's caret position to the new one. The
+        // new workspace's Emacs will send fresh SetCursorRect messages
+        // after focus stabilizes.
+        let now = self.start_time.elapsed();
+        self.jelly_cursor.borrow_mut().update(None, now);
 
         if matches!(self.cursor_status, CursorImageStatus::Surface(_)) {
             self.cursor_status = CursorImageStatus::default_named();

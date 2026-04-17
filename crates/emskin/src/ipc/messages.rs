@@ -73,6 +73,24 @@ pub enum IncomingMessage {
     SwitchWorkspace {
         workspace_id: u64,
     },
+    /// Enable/disable the jelly text-cursor animation overlay.
+    SetJellyCursor {
+        enabled: bool,
+    },
+    /// Report Emacs's current text-cursor rectangle (Emacs surface-local
+    /// coordinates) and optional color. Sent from `post-command-hook` when
+    /// the cursor moves; triggers a 200ms jelly animation from the previous
+    /// rect to the new one.
+    ///
+    /// `color` is a CSS hex string like "#cba6f7" (optional; compositor
+    /// falls back to a default if missing or unparseable). Sending w or h
+    /// of 0 cancels any in-flight animation (e.g. when buffer loses focus).
+    SetCursorRect {
+        #[serde(flatten)]
+        rect: IpcRect,
+        #[serde(default)]
+        color: Option<String>,
+    },
 }
 
 /// A single rectangle in the skeleton overlay. Emacs-side kinds currently
@@ -305,6 +323,51 @@ mod tests {
             }
             _ => panic!("expected SetSkeleton"),
         }
+    }
+
+    #[test]
+    fn parses_set_jelly_cursor() {
+        let json = r#"{"type":"set_jelly_cursor","enabled":true}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            IncomingMessage::SetJellyCursor { enabled: true }
+        ));
+    }
+
+    #[test]
+    fn parses_set_cursor_rect_with_color() {
+        let json =
+            r##"{"type":"set_cursor_rect","x":10,"y":20,"w":2,"h":18,"color":"#cba6f7"}"##;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            IncomingMessage::SetCursorRect { rect, color } => {
+                assert_eq!(rect.x, 10);
+                assert_eq!(rect.y, 20);
+                assert_eq!(rect.w, 2);
+                assert_eq!(rect.h, 18);
+                assert_eq!(color.as_deref(), Some("#cba6f7"));
+            }
+            _ => panic!("expected SetCursorRect"),
+        }
+    }
+
+    #[test]
+    fn parses_set_cursor_rect_without_color() {
+        let json = r#"{"type":"set_cursor_rect","x":0,"y":0,"w":0,"h":0}"#;
+        let msg: IncomingMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            msg,
+            IncomingMessage::SetCursorRect {
+                rect: IpcRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                },
+                color: None,
+            }
+        ));
     }
 
     #[test]

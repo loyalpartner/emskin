@@ -62,7 +62,33 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
             // (before keyboard.set_focus to avoid race conditions).
             state.switch_workspace(workspace_id);
         }
+        IncomingMessage::SetJellyCursor { enabled } => {
+            tracing::debug!("IPC set_jelly_cursor enabled={enabled}");
+            state.jelly_cursor.borrow_mut().set_enabled(enabled);
+        }
+        IncomingMessage::SetCursorRect { rect, color } => {
+            ipc_set_cursor_rect(state, rect, color);
+        }
     }
+}
+
+fn ipc_set_cursor_rect(
+    state: &mut EmskinState,
+    rect: crate::ipc::IpcRect,
+    color: Option<String>,
+) {
+    let now = state.start_time.elapsed();
+    let canvas_rect = state.emacs_rect_to_canvas(rect);
+    let mut jc = state.jelly_cursor.borrow_mut();
+    if let Some(hex) = color.as_deref() {
+        jc.set_color_hex(hex);
+    }
+    // Zero-size rect cancels animation (e.g. buffer lost focus).
+    if rect.w <= 0 || rect.h <= 0 {
+        jc.update(None, now);
+        return;
+    }
+    jc.update(Some(canvas_rect), now);
 }
 
 fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, rect: crate::ipc::IpcRect) {
@@ -72,12 +98,7 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, rect: crate::ipc::I
         tracing::warn!("IPC set_geometry: invalid size ({w}x{h}), ignoring");
         return;
     }
-    // IPC coordinates are relative to Emacs surface. Translate by Emacs
-    // frame's current origin (non-zero when a layer surface reserves space
-    // at the top via `exclusive_zone`).
-    let origin_y = state.emacs_geometry().map_or(0, |g| g.loc.y);
-    let ay = y + origin_y;
-    let new_geo = smithay::utils::Rectangle::new((x, ay).into(), (w, h).into());
+    let new_geo = state.emacs_rect_to_canvas(rect);
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
     };
@@ -195,8 +216,7 @@ fn ipc_add_mirror(
         tracing::warn!("IPC add_mirror: invalid size ({w}x{h}), ignoring");
         return;
     }
-    let origin_y = state.emacs_geometry().map_or(0, |g| g.loc.y);
-    let geo = smithay::utils::Rectangle::new((x, y + origin_y).into(), (w, h).into());
+    let geo = state.emacs_rect_to_canvas(rect);
     let Some(app) = state.apps.get_mut(window_id) else {
         tracing::warn!("add_mirror: unknown window_id={window_id}");
         return;
@@ -224,8 +244,7 @@ fn ipc_update_mirror_geometry(
         tracing::warn!("IPC update_mirror_geometry: invalid size ({w}x{h}), ignoring");
         return;
     }
-    let origin_y = state.emacs_geometry().map_or(0, |g| g.loc.y);
-    let geo = smithay::utils::Rectangle::new((x, y + origin_y).into(), (w, h).into());
+    let geo = state.emacs_rect_to_canvas(rect);
     let Some(app) = state.apps.get_mut(window_id) else {
         return;
     };

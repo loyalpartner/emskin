@@ -46,6 +46,19 @@ Elastic trailing animation: 10 spring-damped nodes follow the cursor in a chain.
 - `pub fn set_enabled(bool)` — toggle (called from `IncomingMessage::SetCursorTrail`)
 - `impl Effect` reads `ctx.cursor_pos` + `ctx.present_time` to step physics; `post_paint` returns `!settled` to keep redrawing during settle
 
+### `jelly_cursor` — chain_position 77
+
+Port of holo-layer's `jelly` text-cursor animation. When Emacs's caret moves, a filled quadrilateral stretches from the previous caret rect to the new one over 200 ms, then collapses into the new rect (two-phase deformation around `p = 0.5`). Scanline-fills the polygon into a bounding-box-sized `MemoryRenderBuffer` each frame with a linear gradient (lightened tail → solid head).
+
+- `pub fn set_enabled(bool)` — toggle
+- `pub fn update(rect: Option<Rectangle<i32, Logical>>, now: Duration)` — host hands in the current caret rect in **canvas** coordinates:
+  - `None` → cancel animation, forget last rect (so re-entry re-primes)
+  - first `Some` after a `None` → prime, no animation
+  - `Some` equal to last → no-op
+  - `Some` different → seed a new animation from the previous rect
+- Data source: `zwp_text_input_v3.set_cursor_rectangle`. pgtk Emacs reports this on every caret move via GTK's IM framework — **pgtk-only**. GTK3 Emacs (XWayland) has no Wayland-side caret signal.
+- Host (emskin) drives this from `EmskinState::sync_jelly_caret()` called once per frame. It polls `seat.text_input().focus()` + `cursor_rectangle()`, filters for the active Emacs surface, and resets on focus boundary transitions (app → Emacs, Emacs → app) so the animation never spans two surfaces.
+
 The workspace bar used to live here. It was extracted into a standalone Wayland client (`crates/emskin-bar/`) that talks to the compositor via `zwlr-layer-shell-v1` + `ext-workspace-v1` — effect-plugins no longer carries workspace semantics.
 
 ## Canvas-only drawing
@@ -59,6 +72,7 @@ Every plugin paints **only within** `ctx.canvas` (an `Rectangle<i32, Logical>` e
 - `skeleton::is_active` = `self.enabled`
 - `splash::is_active` = `!self.done`
 - `cursor_trail::is_active` = `self.enabled`
+- `jelly_cursor::is_active` = `self.enabled`
 
 ## Adding a new plugin
 
