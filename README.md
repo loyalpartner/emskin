@@ -14,12 +14,13 @@ emskin wraps Emacs inside a nested Wayland compositor so that **any program** �
 
 ## Features
 
-- **Embed any program** — Wayland and X11 apps alike
+- **Embed any program** — Wayland and X11 apps alike, including FPS games / browser Pointer Lock (pointer constraints + raw mouse delta)
 - **Window mirroring** — display the same app in multiple Emacs windows
 - **Input method support** — shares the host IM with precise cursor positioning
 - **Clipboard sync** — bidirectional between host and embedded apps
 - **Launcher support** — rofi / wofi / zofi work out of the box
 - **Automatic focus management** — new windows auto-focus; focus falls back on close
+- **Built-in screen recording & screenshots** — toggle MP4 capture or snap a PNG, no external tools
 
 ## Compatibility
 
@@ -89,7 +90,7 @@ When an embedded app has focus, keystrokes go directly to it. Emacs prefix keys 
 
 ### Effects
 
-emskin ships four live-toggleable visual effects, plus a non-toggleable startup splash.
+emskin ships five live-toggleable effects, plus a non-toggleable startup splash.
 
 | Effect | Variable | Toggle | What it does |
 |--------|----------|--------|--------------|
@@ -97,6 +98,7 @@ emskin ships four live-toggleable visual effects, plus a non-toggleable startup 
 | skeleton | `emskin-skeleton` | `M-x emskin-toggle-skeleton` | Frame-layout wireframes (debug overlay, clickable labels) |
 | cursor trail | `emskin-cursor-trail` | `M-x emskin-toggle-cursor-trail` | Elastic spring trail behind the mouse pointer |
 | jelly cursor | `emskin-jelly-cursor` | `M-x emskin-toggle-jelly-cursor` | Jelly-style animation on Emacs's text caret (pgtk-only color sync) |
+| recorder | `emskin-record` | `M-x emskin-toggle-record` | MP4 screen capture with on-screen indicator (red dot + MM:SS timer) |
 
 All default to off. Configure in `~/.emacs.d/init.el`:
 
@@ -106,6 +108,21 @@ All default to off. Configure in `~/.emacs.d/init.el`:
 ```
 
 Values sync automatically on IPC connect, so `setq` works unchanged. After changing a variable mid-session, run `M-x emskin-apply-config` to push it immediately.
+
+### Recording & screenshots
+
+Two independent commands; either one works while the other is active:
+
+| Command | Output | Customize |
+|---------|--------|-----------|
+| `M-x emskin-toggle-record` | `~/Videos/emskin/emskin-YYYYMMDD-HHMMSS.mp4` | `emskin-record-dir`, `emskin-record-fps` (default 30) |
+| `M-x emskin-screenshot` | `~/Videos/emskin/emskin-YYYYMMDD-HHMMSS.png` | `emskin-screenshot-dir` (defaults to `emskin-record-dir`) |
+
+The recorder is also exposed as a regular toggle (above), so it picks up the same `setq` + `emskin-apply-config` lifecycle as the other effects. Bind to your key of choice — for example:
+
+```elisp
+(global-set-key (kbd "C-c C-r") #'emskin-toggle-record)
+```
 
 ### Workspaces
 
