@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/emskin/emskin/compare/v0.1.10...v0.2.0) (2026-04-17)
+
+
+### Features
+
+* jelly text-cursor + unified effect toggle macros ([#32](https://github.com/emskin/emskin/issues/32)) ([f255010](https://github.com/emskin/emskin/commit/f255010b5b7457d7a00e53858354ef603d1a3018))
+
 ## [0.1.10](https://github.com/emskin/emskin/compare/v0.1.9...v0.1.10) (2026-04-17)
 
 
