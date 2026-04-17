@@ -69,14 +69,50 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
         IncomingMessage::SetCursorRect { rect, color } => {
             ipc_set_cursor_rect(state, rect, color);
         }
+        IncomingMessage::TakeScreenshot { path } => {
+            tracing::debug!("IPC take_screenshot path={path}");
+            state
+                .recorder
+                .request_screenshot(std::path::PathBuf::from(path));
+            // Force a render so the request fires this tick even on an
+            // otherwise-idle frame.
+            state.needs_redraw = true;
+        }
+        IncomingMessage::SetRecording { enabled, path, fps } => {
+            // The overlay and Emacs-side `emskin-record` both derive
+            // from the Recorder's state, not from this dispatch arm:
+            //   - overlay is set in `render_frame` via
+            //     `Recorder::overlay_started_at`, so if ffmpeg spawn
+            //     fails the red dot never lights up
+            //   - the elisp toggle resyncs via `RecordingStopped` IPC,
+            //     emitted when `finalize` drains `Stopping`
+            // Dispatch here only drives the state machine + forces a
+            // render tick so the request is picked up this frame.
+            if enabled {
+                match (path, fps) {
+                    (Some(path), Some(fps)) if fps > 0 => {
+                        tracing::debug!("IPC set_recording start path={path} fps={fps}");
+                        state
+                            .recorder
+                            .request_recording(std::path::PathBuf::from(path), fps);
+                        state.needs_redraw = true;
+                    }
+                    (path, fps) => {
+                        tracing::warn!(
+                            "IPC set_recording enabled=true with invalid path={path:?} fps={fps:?}"
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!("IPC set_recording stop");
+                state.recorder.stop_recording();
+                state.needs_redraw = true;
+            }
+        }
     }
 }
 
-fn ipc_set_cursor_rect(
-    state: &mut EmskinState,
-    rect: crate::ipc::IpcRect,
-    color: Option<String>,
-) {
+fn ipc_set_cursor_rect(state: &mut EmskinState, rect: crate::ipc::IpcRect, color: Option<String>) {
     let now = state.start_time.elapsed();
     let canvas_rect = state.emacs_rect_to_canvas(rect);
     let mut jc = state.jelly_cursor.borrow_mut();

@@ -27,6 +27,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 include_dir = "0.7"
+png = "0.17"
 
 [package.metadata.aur]
 depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]

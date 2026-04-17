@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod capture;
 pub mod clipboard;
 pub mod clipboard_dispatch;
 pub mod clipboard_x11;
@@ -8,6 +9,7 @@ pub mod input;
 pub mod ipc;
 pub mod mirror_render;
 pub mod protocols;
+pub mod recording;
 pub mod state;
 pub mod tick;
 pub mod utils;

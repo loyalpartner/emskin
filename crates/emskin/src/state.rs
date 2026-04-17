@@ -210,6 +210,8 @@ pub struct EmskinState {
     pub splash: std::rc::Rc<std::cell::RefCell<effect_plugins::splash::SplashScreen>>,
     pub cursor_trail: std::rc::Rc<std::cell::RefCell<effect_plugins::cursor_trail::CursorTrail>>,
     pub jelly_cursor: std::rc::Rc<std::cell::RefCell<effect_plugins::jelly_cursor::JellyCursor>>,
+    pub recorder_overlay:
+        std::rc::Rc<std::cell::RefCell<effect_plugins::recorder::RecorderOverlay>>,
 
     /// Whether a skeleton label-click was swallowed — matching release must
     /// also be swallowed. Lives in the window manager, not the overlay.
@@ -230,6 +232,10 @@ pub struct EmskinState {
     /// workspace switch) that smithay's per-element OutputDamageTracker does
     /// not cover.  When true the next Redraw calls render_frame; cleared after.
     pub needs_redraw: bool,
+
+    /// Screenshot / screen-record state machine. Driven by IPC
+    /// (`TakeScreenshot { path }`) and consumed by the winit render loop.
+    pub recorder: crate::recording::Recorder,
 }
 
 impl EmskinState {
@@ -301,6 +307,10 @@ impl EmskinState {
             &mut effect_chain,
             effect_plugins::jelly_cursor::JellyCursor::new(),
         );
+        let recorder_overlay = register_overlay(
+            &mut effect_chain,
+            effect_plugins::recorder::RecorderOverlay::new(),
+        );
 
         Ok(Self {
             start_time,
@@ -367,11 +377,13 @@ impl EmskinState {
             splash,
             cursor_trail,
             jelly_cursor,
+            recorder_overlay,
             skeleton_click_absorbed: false,
             last_emacs_connected: false,
             cursor_status: CursorImageStatus::default_named(),
             cursor_changed: false,
             needs_redraw: true,
+            recorder: crate::recording::Recorder::new(),
         })
     }
 
@@ -433,10 +445,7 @@ impl EmskinState {
     /// adding the current usable-area origin. Used by every IPC geometry
     /// handler — a top-anchored layer surface (bar) shifts the origin and
     /// all rects must track.
-    pub fn emacs_rect_to_canvas(
-        &self,
-        rect: crate::ipc::IpcRect,
-    ) -> Rectangle<i32, Logical> {
+    pub fn emacs_rect_to_canvas(&self, rect: crate::ipc::IpcRect) -> Rectangle<i32, Logical> {
         let crate::ipc::IpcRect { x, y, w, h } = rect;
         let origin = self.emacs_geometry().map(|g| g.loc).unwrap_or_default();
         Rectangle::new(

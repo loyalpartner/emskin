@@ -150,11 +150,7 @@ impl JellyCursor {
         if elapsed >= DURATION {
             return None;
         }
-        Some((
-            elapsed.as_secs_f64() / DURATION.as_secs_f64(),
-            *from,
-            *to,
-        ))
+        Some((elapsed.as_secs_f64() / DURATION.as_secs_f64(), *from, *to))
     }
 }
 
@@ -204,8 +200,7 @@ impl effect_core::Effect for JellyCursor {
         let bbox_h = (max_y.ceil() as i32 - bbox_y + BBOX_PAD).max(1);
 
         let origin = Point::<f64, Logical>::from((bbox_x as f64, bbox_y as f64));
-        let pts_local: [Point<f64, Logical>; 4] =
-            std::array::from_fn(|i| pts[i] - origin);
+        let pts_local: [Point<f64, Logical>; 4] = std::array::from_fn(|i| pts[i] - origin);
         let gradient = Gradient {
             from: rect_center(from) - origin,
             to: rect_center(to) - origin,
@@ -263,7 +258,12 @@ fn jelly_polygon(start: RectF, end: RectF, p: f64) -> [Point<f64, Logical>; 4] {
     // Four base corners per motion quadrant — keeps the polygon convex and
     // non-self-intersecting regardless of direction.
     let mut pts = if dx * dy > 0.0 {
-        [cs, cs + Point::from((ws, hs)), ce + Point::from((we, he)), ce]
+        [
+            cs,
+            cs + Point::from((ws, hs)),
+            ce + Point::from((we, he)),
+            ce,
+        ]
     } else if dx * dy < 0.0 {
         [
             cs + Point::from((0.0, hs)),
@@ -384,12 +384,12 @@ struct Gradient {
 ///
 /// Pixels outside the polygon are cleared to transparent in the same pass
 /// (merging clear + fill saves a full-buffer zeroing sweep).
-fn fill_polygon_bgra(
-    buf: PixelBuffer<'_>,
-    pts: &[Point<f64, Logical>; 4],
-    grad: &Gradient,
-) {
-    let PixelBuffer { data, w: buf_w, h: buf_h } = buf;
+fn fill_polygon_bgra(buf: PixelBuffer<'_>, pts: &[Point<f64, Logical>; 4], grad: &Gradient) {
+    let PixelBuffer {
+        data,
+        w: buf_w,
+        h: buf_h,
+    } = buf;
     let stride = buf_w * 4;
 
     let (_, min_yf, _, max_yf) = bounds(pts);
@@ -565,7 +565,11 @@ mod tests {
             c_end: [0, 0, 0xff, 0xff],
         };
         fill_polygon_bgra(
-            PixelBuffer { data: &mut data, w: 16, h: 16 },
+            PixelBuffer {
+                data: &mut data,
+                w: 16,
+                h: 16,
+            },
             &pts,
             &grad,
         );
@@ -579,8 +583,14 @@ mod tests {
 
     #[test]
     fn parses_hex_colors() {
-        assert_eq!(parse_hex_color("#cba6f7"), Some([0xf7, 0xa6, 0xcb, COLOR_ALPHA]));
-        assert_eq!(parse_hex_color("cba6f7"), Some([0xf7, 0xa6, 0xcb, COLOR_ALPHA]));
+        assert_eq!(
+            parse_hex_color("#cba6f7"),
+            Some([0xf7, 0xa6, 0xcb, COLOR_ALPHA])
+        );
+        assert_eq!(
+            parse_hex_color("cba6f7"),
+            Some([0xf7, 0xa6, 0xcb, COLOR_ALPHA])
+        );
         assert_eq!(parse_hex_color("#cba6f780"), Some([0xf7, 0xa6, 0xcb, 0x80]));
         assert_eq!(parse_hex_color("not-a-color"), None);
         assert_eq!(parse_hex_color("#abc"), None);
@@ -605,7 +615,10 @@ mod tests {
     fn update_with_none_sets_idle() {
         let mut jc = JellyCursor::new();
         jc.set_enabled(true);
-        jc.update(Some(Rectangle::new((10, 10).into(), (8, 16).into())), Duration::ZERO);
+        jc.update(
+            Some(Rectangle::new((10, 10).into(), (8, 16).into())),
+            Duration::ZERO,
+        );
         assert!(matches!(jc.state, AnimState::Primed(_)));
         jc.update(None, Duration::from_millis(50));
         assert!(matches!(jc.state, AnimState::Idle));
@@ -636,7 +649,10 @@ mod tests {
     fn update_mid_flight_retargets_without_stalling() {
         let mut jc = JellyCursor::new();
         jc.set_enabled(true);
-        jc.update(Some(Rectangle::new((0, 0).into(), (8, 16).into())), Duration::ZERO);
+        jc.update(
+            Some(Rectangle::new((0, 0).into(), (8, 16).into())),
+            Duration::ZERO,
+        );
         jc.update(
             Some(Rectangle::new((20, 0).into(), (8, 16).into())),
             Duration::from_millis(10),

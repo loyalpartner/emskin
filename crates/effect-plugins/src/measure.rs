@@ -16,68 +16,9 @@ use smithay::{
 
 use effect_core::paint_buffer;
 
-// ---------------------------------------------------------------------------
-// Embedded 5×7 bitmap font (column-major, bit 0 = top row)
-// ---------------------------------------------------------------------------
+use crate::bitmap_font::{draw_text, label_width, GLYPH_H};
 
-const GLYPH_W: i32 = 5;
-const GLYPH_H: i32 = 7;
-const GLYPH_SPACING: i32 = 1;
 const LABEL_PAD: i32 = 3;
-
-/// Returns the 5-column bitmap for a character, or None if unsupported.
-fn glyph(ch: char) -> Option<[u8; 5]> {
-    Some(match ch {
-        '0' => [0x3E, 0x51, 0x49, 0x45, 0x3E],
-        '1' => [0x00, 0x42, 0x7F, 0x40, 0x00],
-        '2' => [0x42, 0x61, 0x51, 0x49, 0x46],
-        '3' => [0x21, 0x41, 0x45, 0x4B, 0x31],
-        '4' => [0x18, 0x14, 0x12, 0x7F, 0x10],
-        '5' => [0x27, 0x45, 0x45, 0x45, 0x39],
-        '6' => [0x3C, 0x4A, 0x49, 0x49, 0x30],
-        '7' => [0x01, 0x71, 0x09, 0x05, 0x03],
-        '8' => [0x36, 0x49, 0x49, 0x49, 0x36],
-        '9' => [0x06, 0x49, 0x49, 0x29, 0x1E],
-        ' ' => [0x00, 0x00, 0x00, 0x00, 0x00],
-        ',' => [0x00, 0x50, 0x30, 0x00, 0x00],
-        '(' => [0x00, 0x1C, 0x22, 0x41, 0x00],
-        ')' => [0x00, 0x41, 0x22, 0x1C, 0x00],
-        '-' => [0x08, 0x08, 0x08, 0x08, 0x08],
-        _ => return None,
-    })
-}
-
-/// Blit a string into a BGRA buffer using the 5×7 bitmap font.
-///
-/// `pos` is the top-left anchor of the first glyph in buffer coordinates.
-fn draw_text(
-    data: &mut [u8],
-    buf_size: Size<i32, Buffer>,
-    pos: Point<i32, Buffer>,
-    text: &str,
-    color: &[u8; 4],
-) {
-    let stride = buf_size.w * 4;
-    let mut cursor_x = pos.x;
-    for ch in text.chars() {
-        if let Some(cols) = glyph(ch) {
-            for (gc, &col_bits) in cols.iter().enumerate() {
-                for gr in 0..GLYPH_H {
-                    if col_bits & (1 << gr) == 0 {
-                        continue;
-                    }
-                    let px = cursor_x + gc as i32;
-                    let py = pos.y + gr;
-                    if px >= 0 && px < buf_size.w && py >= 0 && py < buf_size.h {
-                        let off = (py * stride + px * 4) as usize;
-                        data[off..off + 4].copy_from_slice(color);
-                    }
-                }
-            }
-        }
-        cursor_x += GLYPH_W + GLYPH_SPACING;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Measure overlay — Figma-style pixel inspector: crosshair lines, coordinate
@@ -112,16 +53,6 @@ fn tick_length(pos: i32) -> i32 {
         MID_TICK_LEN
     } else {
         MINOR_TICK_LEN
-    }
-}
-
-/// Pixel width a bitmap-font string occupies (excluding trailing spacing).
-fn label_width(text: &str) -> i32 {
-    let cc = text.chars().count() as i32;
-    if cc == 0 {
-        0
-    } else {
-        cc * (GLYPH_W + GLYPH_SPACING) - GLYPH_SPACING
     }
 }
 

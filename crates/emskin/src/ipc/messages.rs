@@ -91,6 +91,26 @@ pub enum IncomingMessage {
         #[serde(default)]
         color: Option<String>,
     },
+    /// Request a one-shot PNG screenshot of the composited output, written
+    /// to the given absolute path. Replaces any previously queued request.
+    TakeScreenshot {
+        path: String,
+    },
+    /// Start/stop a continuous video recording.
+    ///
+    /// `enabled: true` begins a new recording; `path` and `fps` are required
+    /// in that case (the compositor rejects the request otherwise). If a
+    /// recording is already running, it is cancelled and replaced.
+    ///
+    /// `enabled: false` stops the active recording; `path` and `fps` are
+    /// ignored.
+    SetRecording {
+        enabled: bool,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        fps: Option<u32>,
+    },
 }
 
 /// A single rectangle in the skeleton overlay. Emacs-side kinds currently
@@ -150,6 +170,17 @@ pub enum OutgoingMessage {
     /// A workspace was destroyed (Emacs frame closed).
     WorkspaceDestroyed {
         workspace_id: u64,
+    },
+    /// A screen recording finished. `reason` is `"user"` (Emacs stopped
+    /// via `emskin-toggle-record`), `"resize"` (framebuffer size changed
+    /// mid-recording), `"encoder_error"` (ffmpeg died), or `"replaced"`
+    /// (a new recording request pre-empted this one). Emacs should clear
+    /// `emskin-record` regardless of which.
+    RecordingStopped {
+        path: String,
+        frames_written: u64,
+        duration_secs: f64,
+        reason: String,
     },
 }
 
@@ -337,8 +368,7 @@ mod tests {
 
     #[test]
     fn parses_set_cursor_rect_with_color() {
-        let json =
-            r##"{"type":"set_cursor_rect","x":10,"y":20,"w":2,"h":18,"color":"#cba6f7"}"##;
+        let json = r##"{"type":"set_cursor_rect","x":10,"y":20,"w":2,"h":18,"color":"#cba6f7"}"##;
         let msg: IncomingMessage = serde_json::from_str(json).unwrap();
         match msg {
             IncomingMessage::SetCursorRect { rect, color } => {
