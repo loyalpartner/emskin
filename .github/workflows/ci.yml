@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   check:
     name: Check / Clippy / Fmt
@@ -71,3 +75,21 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+  release-please:
+    name: Release Please
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Uses the default GITHUB_TOKEN. This opens/updates the Release
+          # PR automatically; after you merge it, tag + GitHub Release may
+          # need to be created manually with `gh release create vX.Y.Z
+          # --target <merge-sha>` (release-please sometimes aborts with
+          # GITHUB_TOKEN and tags it creates don't trigger downstream
+          # workflows anyway). A fine-grained PAT in secrets.RELEASE_PLEASE_TOKEN
+          # would close that loop, but the manual step is short enough.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
