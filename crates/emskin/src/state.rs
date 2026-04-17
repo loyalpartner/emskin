@@ -21,6 +21,8 @@ use smithay::{
         dmabuf::{DmabufGlobal, DmabufState},
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
+        pointer_constraints::PointerConstraintsState,
+        relative_pointer::RelativePointerManagerState,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
         shell::{
             wlr_layer::WlrLayerShellState,
@@ -94,6 +96,12 @@ pub struct WaylandState {
     /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
     pub dmabuf_global: Option<DmabufGlobal>,
     pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
+    /// Exposes `zwp_pointer_constraints_v1` — lock/confine pointer for games
+    /// (Minecraft, Blender, browser Pointer Lock).
+    pub pointer_constraints_state: PointerConstraintsState,
+    /// Exposes `zwp_relative_pointer_manager_v1` — delivers raw mouse deltas
+    /// to clients that bind the protocol (required for FPS camera control).
+    pub relative_pointer_manager_state: RelativePointerManagerState,
     pub popups: PopupManager,
 }
 
@@ -228,6 +236,13 @@ pub struct EmskinState {
     /// Set when cursor_status changes; consumed by apply_pending_state.
     pub cursor_changed: bool,
 
+    /// Last raw absolute pointer location from the host, in compositor
+    /// coords. Used to synthesize relative-motion deltas for
+    /// `zwp_relative_pointer_v1` (required by FPS games) — the winit
+    /// backend only emits absolute positions, so we diff consecutive
+    /// absolutes to produce the delta. `None` on first event.
+    pub last_pointer_raw_loc: Option<Point<f64, Logical>>,
+
     /// Coarse damage flag for structural events (IPC, layer shell, input,
     /// workspace switch) that smithay's per-element OutputDamageTracker does
     /// not cover.  When true the next Redraw calls render_frame; cleared after.
@@ -263,6 +278,8 @@ impl EmskinState {
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
         let text_input_manager_state =
             smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
+        let relative_pointer_manager_state = RelativePointerManagerState::new::<Self>(&dh);
         let dmabuf_state = DmabufState::new();
 
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -350,6 +367,8 @@ impl EmskinState {
                 dmabuf_state,
                 dmabuf_global: None,
                 text_input_manager_state,
+                pointer_constraints_state,
+                relative_pointer_manager_state,
                 popups,
             },
             xwm: None,
@@ -382,6 +401,7 @@ impl EmskinState {
             last_emacs_connected: false,
             cursor_status: CursorImageStatus::default_named(),
             cursor_changed: false,
+            last_pointer_raw_loc: None,
             needs_redraw: true,
             recorder: crate::recording::Recorder::new(),
         })
