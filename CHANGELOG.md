@@ -3,6 +3,10 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.5] - 2026-04-18
+
+### Bug Fixes
+- Don't use {{version}} in pre-release-commit-message
 ## [0.3.4] - 2026-04-18
 
 ### Bug Fixes

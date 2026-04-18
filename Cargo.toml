@@ -8,7 +8,7 @@ members = ["crates/*"]
 default-members = ["crates/emskin", "crates/emskin-bar"]
 
 [workspace.package]
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 authors = ["Lee <loyalpartner@163.com>"]
 license = "GPL-3.0"
