@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/emskin/emskin/compare/v0.2.0...v0.3.0) (2026-04-18)
+
+
+### Features
+
+* screen recording (toggle-record) + screenshot (take_screenshot) ([59b7a55](https://github.com/emskin/emskin/commit/59b7a5582f994763a416a8aa3086e440db6dc9a5))
+* support pointer-constraints + relative-pointer ([#24](https://github.com/emskin/emskin/issues/24)) ([4243ab9](https://github.com/emskin/emskin/commit/4243ab99d55fd9351a126940538871e7ef9934fe))
+
 ## [0.2.0](https://github.com/emskin/emskin/compare/v0.1.10...v0.2.0) (2026-04-17)
 
 
