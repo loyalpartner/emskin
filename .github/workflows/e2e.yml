@@ -49,6 +49,8 @@ jobs:
             libxkbcommon-x11-dev \
             libfontconfig1-dev \
             libfreetype-dev \
+            libegl1 \
+            libgles2 \
             xvfb \
             xwayland \
             x11-utils \
