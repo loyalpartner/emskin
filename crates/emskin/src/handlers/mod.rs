@@ -164,9 +164,6 @@ impl SelectionHandler for EmskinState {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        let Some(ref mut clipboard) = self.selection.clipboard else {
-            return;
-        };
         if let Some(source) = source {
             let mime_types = source.mime_types();
 
@@ -176,13 +173,16 @@ impl SelectionHandler for EmskinState {
                 self.start_time.elapsed().as_secs_f32(),
             );
 
-            // Skip selections that arrive before Emacs IPC connects —
-            // GTK/Emacs announces clipboard ownership on startup which
-            // would clear the host clipboard. Real user copies only
-            // happen after emskin.el connects.
-            if !ipc_connected {
-                return;
+            // Internal bridge (anvil pattern): tell the X11 side a wayland
+            // client owns the selection so X clients can paste. Unconditional
+            // — X clients inside emskin should always see each other's
+            // wayland copies, even before Emacs IPC connects.
+            if let Some(ref mut xwm) = self.xwm {
+                if let Err(e) = xwm.new_selection(ty, Some(mime_types.clone())) {
+                    tracing::warn!("propagating wayland {ty:?} selection to X failed: {e}");
+                }
             }
+
             match ty {
                 SelectionTarget::Clipboard => {
                     self.selection.clipboard_origin = crate::state::SelectionOrigin::Wayland
@@ -191,10 +191,26 @@ impl SelectionHandler for EmskinState {
                     self.selection.primary_origin = crate::state::SelectionOrigin::Wayland
                 }
             }
-            clipboard.set_host_selection(ty, &mime_types);
+
+            // Host push: keep the user's real desktop clipboard manager in
+            // sync. Gated on IPC connectivity because GTK/Emacs announces
+            // clipboard ownership on startup which would otherwise clobber
+            // host clipboard before the user ever types anything.
+            if ipc_connected {
+                if let Some(ref mut clipboard) = self.selection.clipboard {
+                    clipboard.set_host_selection(ty, &mime_types);
+                }
+            }
         } else {
             tracing::debug!("Internal selection cleared ({ty:?})");
-            clipboard.clear_host_selection(ty);
+            if let Some(ref mut xwm) = self.xwm {
+                if let Err(e) = xwm.new_selection(ty, None) {
+                    tracing::warn!("clearing X {ty:?} selection failed: {e}");
+                }
+            }
+            if let Some(ref mut clipboard) = self.selection.clipboard {
+                clipboard.clear_host_selection(ty);
+            }
         }
     }
 
@@ -206,11 +222,41 @@ impl SelectionHandler for EmskinState {
         _seat: Seat<Self>,
         _user_data: &(),
     ) {
-        // Internal client wants to paste our compositor-injected (host) selection.
-        // Forward the fd directly to the host so the host source writes into it.
-        if let Some(ref mut clipboard) = self.selection.clipboard {
-            tracing::debug!("Forwarding host selection to internal client ({ty:?}, {mime_type})");
-            clipboard.receive_from_host(ty, &mime_type, fd);
+        tracing::debug!("Wayland paste request ({ty:?}, {mime_type})");
+        let origin = match ty {
+            SelectionTarget::Clipboard => self.selection.clipboard_origin,
+            SelectionTarget::Primary => self.selection.primary_origin,
+        };
+        use crate::state::SelectionOrigin;
+        match origin {
+            SelectionOrigin::Wayland => {
+                // Another wayland client on us owns the selection —
+                // smithay routes directly between them via the shared
+                // data_device; emskin's handler should not be called
+                // here. If we are, dropping fd yields EOF gracefully.
+                tracing::debug!(
+                    "Wayland paste origin=Wayland — smithay routes internally, dropping fd"
+                );
+                drop(fd);
+            }
+            SelectionOrigin::X11 => {
+                if let Some(ref mut xwm) = self.xwm {
+                    if let Err(e) = xwm.send_selection(ty, mime_type, fd) {
+                        tracing::warn!("wayland paste from X source failed: {e}");
+                    }
+                } else {
+                    tracing::warn!("Wayland paste origin=X11 but XWM unavailable; dropping fd");
+                    drop(fd);
+                }
+            }
+            SelectionOrigin::Host => {
+                if let Some(ref mut clipboard) = self.selection.clipboard {
+                    clipboard.receive_from_host(ty, &mime_type, fd);
+                } else {
+                    tracing::warn!("Wayland paste origin=Host but no ClipboardProxy; dropping fd");
+                    drop(fd);
+                }
+            }
         }
     }
 }

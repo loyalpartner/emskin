@@ -5,7 +5,16 @@ use smithay::{
     desktop::Window,
     utils::{Logical, Rectangle},
     wayland::{
-        selection::SelectionTarget,
+        selection::{
+            data_device::{
+                clear_data_device_selection, request_data_device_client_selection,
+                set_data_device_selection,
+            },
+            primary_selection::{
+                clear_primary_selection, request_primary_client_selection, set_primary_selection,
+            },
+            SelectionTarget,
+        },
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
     },
     xwayland::{
@@ -45,7 +54,7 @@ impl XwmHandler for EmskinState {
             return;
         }
 
-        if !self.initial_size_settled && !window.is_override_redirect() {
+        if self.detect_emacs && !self.initial_size_settled && !window.is_override_redirect() {
             // First non-OR X11 window = Emacs (gtk3 via XWayland).
             tracing::info!("Emacs X11 window connected: title={:?}", window.title());
 
@@ -214,20 +223,33 @@ impl XwmHandler for EmskinState {
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
         tracing::debug!("X11 selection set ({selection:?}): {mime_types:?}");
-        if let Some(ref mut clipboard) = self.selection.clipboard {
-            if !self.ipc.is_connected() {
-                tracing::debug!("Skipping pre-IPC X11 {selection:?} selection");
-                return;
+
+        // Internal bridge (anvil pattern): advertise the X11 selection on the
+        // wayland data_device so wayland clients (wl-paste, Emacs pgtk) can
+        // see the offer directly, without depending on a host clipboard
+        // manager to echo the change back. SelectionHandler::send_selection
+        // will route paste fds back to X via xwm.send_selection.
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), ());
+                self.selection.clipboard_origin = crate::state::SelectionOrigin::X11;
             }
-            match selection {
-                SelectionTarget::Clipboard => {
-                    self.selection.clipboard_origin = crate::state::SelectionOrigin::X11
-                }
-                SelectionTarget::Primary => {
-                    self.selection.primary_origin = crate::state::SelectionOrigin::X11
-                }
+            SelectionTarget::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types.clone(), ());
+                self.selection.primary_origin = crate::state::SelectionOrigin::X11;
             }
-            clipboard.set_host_selection(selection, &mime_types);
+        }
+
+        // Still push to the host proxy so the user's real desktop clipboard
+        // manager stays in sync. Gated on IPC connectivity because GTK's
+        // startup selection announcement would otherwise clobber host
+        // clipboard before the user ever types anything.
+        if self.ipc.is_connected() {
+            if let Some(ref mut clipboard) = self.selection.clipboard {
+                clipboard.set_host_selection(selection, &mime_types);
+            }
+        } else {
+            tracing::debug!("Skipping pre-IPC host push of X11 {selection:?} selection");
         }
     }
 
@@ -237,10 +259,12 @@ impl XwmHandler for EmskinState {
             SelectionTarget::Clipboard => {
                 self.selection.host_clipboard_mimes.clear();
                 self.selection.clipboard_origin = crate::state::SelectionOrigin::default();
+                clear_data_device_selection(&self.display_handle, &self.seat);
             }
             SelectionTarget::Primary => {
                 self.selection.host_primary_mimes.clear();
                 self.selection.primary_origin = crate::state::SelectionOrigin::default();
+                clear_primary_selection(&self.display_handle, &self.seat);
             }
         }
         if let Some(ref mut clipboard) = self.selection.clipboard {
@@ -255,10 +279,41 @@ impl XwmHandler for EmskinState {
         mime_type: String,
         fd: OwnedFd,
     ) {
-        // X11 client wants to paste — forward from host clipboard.
-        if let Some(ref mut clipboard) = self.selection.clipboard {
-            tracing::debug!("X11 paste request ({selection:?}, {mime_type})");
-            clipboard.receive_from_host(selection, &mime_type, fd);
+        tracing::debug!("X11 paste request ({selection:?}, {mime_type})");
+        let origin = match selection {
+            SelectionTarget::Clipboard => self.selection.clipboard_origin,
+            SelectionTarget::Primary => self.selection.primary_origin,
+        };
+        use crate::state::SelectionOrigin;
+        match origin {
+            SelectionOrigin::Wayland => match selection {
+                SelectionTarget::Clipboard => {
+                    if let Err(e) = request_data_device_client_selection(&self.seat, mime_type, fd)
+                    {
+                        tracing::warn!("X11 paste from wayland clipboard source failed: {e}");
+                    }
+                }
+                SelectionTarget::Primary => {
+                    if let Err(e) = request_primary_client_selection(&self.seat, mime_type, fd) {
+                        tracing::warn!("X11 paste from wayland primary source failed: {e}");
+                    }
+                }
+            },
+            SelectionOrigin::X11 => {
+                // Another X client on our own XWayland owns the selection
+                // — X server handles paste directly without needing emskin
+                // to mediate. If we're asked, drop fd so peer gets EOF.
+                tracing::debug!("X11 paste origin=X11 — XWayland handles directly, dropping fd");
+                drop(fd);
+            }
+            SelectionOrigin::Host => {
+                if let Some(ref mut clipboard) = self.selection.clipboard {
+                    clipboard.receive_from_host(selection, &mime_type, fd);
+                } else {
+                    tracing::warn!("X11 paste origin=Host but no ClipboardProxy; dropping fd");
+                    drop(fd);
+                }
+            }
         }
     }
 }

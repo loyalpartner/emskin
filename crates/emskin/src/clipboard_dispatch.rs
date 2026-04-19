@@ -66,9 +66,13 @@ fn inject_host_selection(
         tracing::debug!("Host {target:?} cleared");
         match target {
             SelectionTarget::Clipboard => {
-                clear_data_device_selection(&state.display_handle, &state.seat)
+                clear_data_device_selection(&state.display_handle, &state.seat);
+                state.selection.clipboard_origin = SelectionOrigin::default();
             }
-            SelectionTarget::Primary => clear_primary_selection(&state.display_handle, &state.seat),
+            SelectionTarget::Primary => {
+                clear_primary_selection(&state.display_handle, &state.seat);
+                state.selection.primary_origin = SelectionOrigin::default();
+            }
         }
         if let Some(ref mut xwm) = state.xwm {
             if let Err(e) = xwm.new_selection(target, None) {
@@ -84,10 +88,12 @@ fn inject_host_selection(
         }
         match target {
             SelectionTarget::Clipboard => {
-                set_data_device_selection(&state.display_handle, &state.seat, mime_types, ())
+                set_data_device_selection(&state.display_handle, &state.seat, mime_types, ());
+                state.selection.clipboard_origin = SelectionOrigin::Host;
             }
             SelectionTarget::Primary => {
-                set_primary_selection(&state.display_handle, &state.seat, mime_types, ())
+                set_primary_selection(&state.display_handle, &state.seat, mime_types, ());
+                state.selection.primary_origin = SelectionOrigin::Host;
             }
         }
     }
@@ -132,6 +138,15 @@ fn forward_client_selection(
             } else {
                 tracing::warn!("X11 {target:?} selection requested but XWM unavailable");
             }
+        }
+        SelectionOrigin::Host => {
+            // Host asked us for data we got from them — shouldn't
+            // happen in practice (host has the data natively). Drop
+            // the fd so the peer gets EOF instead of hanging.
+            tracing::debug!(
+                "Ignoring {target:?} selection forward: origin is host (no local source)"
+            );
+            drop(fd);
         }
     }
 }
