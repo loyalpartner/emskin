@@ -3,6 +3,16 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.6] - 2026-04-19
+
+### Bug Fixes
+- Use shared-version = "workspace" so {{version}} expands
+
+### Documentation
+- Credit EAF as origin, clarify compatibility table
+
+### Features
+- Screencast-style key chord overlay
 ## [0.3.5] - 2026-04-18
 
 ### Bug Fixes
@@ -23,13 +33,16 @@ Generated from conventional commits via git-cliff.
 
 ### Bug Fixes
 - Scope cargo-release hook + drop redundant replacements
+
+### Documentation
+- Add holo-layer acknowledgement
+## [0.3.2] - 2026-04-18
+
+### Bug Fixes
 - Use full default title pattern
 
 ### CI
 - Rust-cache for speed, decouple release-please from check
-
-### Documentation
-- Add holo-layer acknowledgement
 ## [0.3.1] - 2026-04-18
 
 ### Bug Fixes
