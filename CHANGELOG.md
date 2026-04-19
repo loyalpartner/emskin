@@ -3,6 +3,10 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.8] - 2026-04-19
+
+### Bug Fixes
+- Bump emskin literal + join workspace shared-version group
 ## [0.3.7] - 2026-04-19
 
 ### Bug Fixes
