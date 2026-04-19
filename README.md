@@ -35,12 +35,20 @@ Same IPC layer (compositor ↔ Elisp) that powers embedding today; each future i
 
 ## Compatibility
 
-| Desktop | Wayland | X11 |
-|---------|---------|-----|
-| GNOME   | ✓       | ✓   |
-| KDE     | ✓       | ✓   |
-| Sway    | ✓       | —   |
-| COSMIC  | ✓       | —   |
+Hosts we've actually tested emskin under. The columns indicate which
+kind of desktop session you launched emskin from, **not** which kinds
+of clients it can embed — emskin always embeds both Wayland and X11
+clients (the latter via XWayland), regardless of host. `n/a` just
+means that compositor or window manager doesn't have a session of
+that type to nest into.
+
+| Host    | Wayland session | X11 session |
+|---------|-----------------|-------------|
+| GNOME   | ✓               | ✓           |
+| KDE     | ✓               | ✓           |
+| Sway    | ✓               | n/a         |
+| COSMIC  | ✓               | n/a         |
+| i3wm    | n/a             | ✓           |
 
 pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works via XWayland.
 
@@ -228,8 +236,20 @@ Make sure mesa is installed: `sudo pacman -S mesa mesa-utils` (Arch) or `sudo ap
 
 ## Acknowledgements
 
-- [Smithay](https://github.com/Smithay/smithay) — the Rust Wayland compositor library emskin is built on.
-- [holo-layer](https://github.com/manateelazycat/holo-layer) — the jelly text-cursor effect and the elisp caret-tracking pattern (`post-command-hook` + `pos-visible-in-window-p`) are adapted from holo-layer. Thanks to [@manateelazycat](https://github.com/manateelazycat).
+emskin began as a purpose-built Wayland compositor for the
+[Emacs Application Framework (EAF)](https://github.com/emacs-eaf/emacs-application-framework).
+The original goal was narrow: get EAF's apps running properly under
+Wayland. The broader "embed any Wayland or X11 client into an Emacs
+window" capability you see here today grew out of solving that one
+problem. Huge thanks to [@manateelazycat](https://github.com/manateelazycat)
+for EAF and for years of pushing what an Emacs UI can be — and again
+for [holo-layer](https://github.com/manateelazycat/holo-layer), from
+which the jelly text-cursor effect and the elisp caret-tracking
+pattern (`post-command-hook` + `pos-visible-in-window-p`) are adapted.
+
+emskin is built on [Smithay](https://github.com/Smithay/smithay) — the
+Rust Wayland compositor library that does most of the heavy protocol
+work.
 
 ## License
 
