@@ -3,6 +3,28 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.7] - 2026-04-19
+
+### Bug Fixes
+- Capture XWayland stderr to xwayland.log
+- Drain write buffer synchronously on EAGAIN
+- Bump emskin crate version to match workspace 0.3.6
+
+### CI
+- Install libegl1 / libgles2 for Ubuntu 24.04 Xwayland
+- E2E workflow — build emez, run full parallel suite on PRs
+
+### Documentation
+- Refresh CLAUDE.md / CONTRIBUTING / READMEs / SKILL for E2E workflow
+- Add GitHub bug report issue template
+
+### Features
+- Smithay-based headless E2E host + bump smithay
+- Anvil-pattern X↔Wayland clipboard bridge + test-mode knobs
+- Add --version flag with build-time git SHA
+
+### Tests
+- E2E harness with NestedHost + DisplaySlot + 22-test matrix
 ## [0.3.6] - 2026-04-19
 
 ### Bug Fixes
