@@ -3,6 +3,10 @@
 All notable changes to emskin are documented here.
 Generated from conventional commits via git-cliff.
 
+## [0.3.9] - 2026-04-19
+
+### Bug Fixes
+- Regex-replace emskin literal version via cargo-release
 ## [0.3.8] - 2026-04-19
 
 ### Bug Fixes
