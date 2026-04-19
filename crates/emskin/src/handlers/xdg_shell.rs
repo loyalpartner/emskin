@@ -27,7 +27,7 @@ impl XdgShellHandler for EmskinState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        if self.emacs_surface.is_none() && !self.initial_size_settled {
+        if self.detect_emacs && self.emacs_surface.is_none() && !self.initial_size_settled {
             // First toplevel = Emacs (Wayland/pgtk path only).
             // X11 Emacs sets initial_size_settled in map_window_request.
             tracing::info!("Emacs toplevel connected");

@@ -39,13 +39,22 @@ use smithay::{
 use smithay::reexports::wayland_server::Resource;
 use smithay::wayland::seat::WaylandFocus;
 
-/// Tracks where the active selection came from, so host paste requests
-/// are routed to the correct source (Wayland data_device vs X11 XWM).
+/// Tracks where the active selection came from, so paste requests are
+/// routed to the correct data source.
+///
+/// - `Wayland`: a wayland client on emskin owns a data source that can
+///   be pulled via `request_data_device_client_selection`.
+/// - `X11`: an X client on emskin's XWayland owns the selection; pull
+///   from it via `xwm.send_selection`.
+/// - `Host`: emskin received the selection from the host compositor
+///   via `inject_host_selection` and holds only an offer — actual data
+///   must be pulled back from the host via `ClipboardProxy`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SelectionOrigin {
     #[default]
     Wayland,
     X11,
+    Host,
 }
 
 /// Focus-related state grouped together for clarity.
@@ -174,6 +183,13 @@ pub struct EmskinState {
     /// Set to true once Emacs receives the host window size in its first configure.
     /// After this, host Resized events propagate size to Emacs.
     pub initial_size_settled: bool,
+
+    /// When false, skip the "first toplevel == Emacs" heuristic and the
+    /// "last Emacs frame died → stop" shutdown path. Set from the
+    /// `EMSKIN_DISABLE_EMACS_DETECTION` env var at startup; intended
+    /// for E2E tests that spawn transient Wayland clients (wl-copy,
+    /// xclip, …) without a real Emacs ever attaching.
+    pub detect_emacs: bool,
 
     /// Handle to the spawned Emacs process
     pub emacs_child: Option<std::process::Child>,
@@ -391,6 +407,7 @@ impl EmskinState {
             emacs_surface: None,
             emacs_x11_window: None,
             initial_size_settled: false,
+            detect_emacs: std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
             emacs_child: None,
             bar_child: None,
             elisp_dir: None,
@@ -424,7 +441,16 @@ impl EmskinState {
         display: Display<EmskinState>,
         event_loop: &mut EventLoop<Self>,
     ) -> Result<OsString, Box<dyn std::error::Error>> {
-        let listening_socket = ListeningSocketSource::new_auto()?;
+        // Pin the socket name when `--wayland-socket <NAME>` was passed on
+        // the CLI (main.rs copies the flag value into this env var) or
+        // when `EMSKIN_WAYLAND_SOCKET_NAME` is set directly. Used by E2E
+        // tests so external Wayland clients (wl-copy, xclip, …) have a
+        // predictable WAYLAND_DISPLAY. Otherwise fall through to `new_auto()`
+        // which picks wayland-N.
+        let listening_socket = match std::env::var_os("EMSKIN_WAYLAND_SOCKET_NAME") {
+            Some(name) => ListeningSocketSource::with_name(&name.to_string_lossy())?,
+            None => ListeningSocketSource::new_auto()?,
+        };
         let socket_name = listening_socket.socket_name().to_os_string();
 
         let loop_handle = event_loop.handle();

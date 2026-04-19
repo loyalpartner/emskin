@@ -30,6 +30,13 @@ struct Cli {
     #[arg(long)]
     ipc_path: Option<std::path::PathBuf>,
 
+    /// Pin the Wayland display socket name (default: auto-chosen wayland-N
+    /// by smithay). Useful when external Wayland clients (wl-copy, xclip,
+    /// E2E tests) need a predictable `WAYLAND_DISPLAY`. Overrides the
+    /// `EMSKIN_WAYLAND_SOCKET_NAME` env var if both are set.
+    #[arg(long)]
+    wayland_socket: Option<String>,
+
     /// XKB keyboard layout (e.g. "us", "de", "cn").
     #[arg(long, default_value = "")]
     xkb_layout: String,
@@ -56,11 +63,33 @@ struct Cli {
     ///   * `<path>` — launch the binary at an explicit path (e.g. waybar)
     #[arg(long, default_value = "auto")]
     bar: String,
+
+    /// Write tracing logs to this file instead of stderr.
+    /// Useful for E2E tests that want clean test output but preserved
+    /// diagnostics on failure.
+    #[arg(long)]
+    log_file: Option<std::path::PathBuf>,
+
+    /// Pin the XWayland DISPLAY number (passed through to
+    /// `XWayland::spawn`). Without this, smithay scans
+    /// `/tmp/.X11-unix/X0..X32` for a free slot — which races when
+    /// multiple emskin instances start in parallel (e.g. E2E tests with
+    /// default `--test-threads`). The test harness uses this to
+    /// pre-allocate a unique number per test.
+    #[arg(long)]
+    xwayland_display: Option<u32>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging();
     let cli = Cli::parse();
+    init_logging(cli.log_file.as_deref());
+
+    // --wayland-socket is plumbed through an env var so state.rs's
+    // `init_wayland_listener` can stay signature-stable; CLI flag takes
+    // precedence over a pre-set env var by overwriting it here.
+    if let Some(ref name) = cli.wayland_socket {
+        std::env::set_var("EMSKIN_WAYLAND_SOCKET_NAME", name);
+    }
 
     let mut event_loop: smithay::reexports::calloop::EventLoop<'static, EmskinState> =
         smithay::reexports::calloop::EventLoop::try_new()?;
@@ -91,14 +120,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize clipboard synchronization with host compositor.
     // Try Wayland data_control first; fall back to X11 selection protocol.
-    state.selection.clipboard = clipboard::ClipboardProxy::new()
-        .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
-        .or_else(|| {
-            clipboard_x11::X11ClipboardProxy::new()
-                .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
-        });
-    if let Some(ref clipboard) = state.selection.clipboard {
-        register_clipboard_source(&mut event_loop, clipboard.as_ref())?;
+    //
+    // Test hook: `EMSKIN_DISABLE_HOST_CLIPBOARD=1` disables host clipboard
+    // sync entirely. Kept as a safety valve for debugging; the E2E
+    // harness doesn't need it anymore because each test gets its own
+    // private host compositor (see `tests/common/mod.rs::NestedHost`).
+    if std::env::var_os("EMSKIN_DISABLE_HOST_CLIPBOARD").is_none() {
+        state.selection.clipboard = clipboard::ClipboardProxy::new()
+            .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
+            .or_else(|| {
+                clipboard_x11::X11ClipboardProxy::new()
+                    .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
+            });
+        if let Some(ref clipboard) = state.selection.clipboard {
+            register_clipboard_source(&mut event_loop, clipboard.as_ref())?;
+        }
+    } else {
+        tracing::info!("EMSKIN_DISABLE_HOST_CLIPBOARD set; host clipboard sync disabled");
     }
 
     register_ipc_source(&mut event_loop, &state)?;
@@ -114,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    start_xwayland(event_loop.handle(), &mut state);
+    start_xwayland(event_loop.handle(), &mut state, cli.xwayland_display);
 
     // Launch the external workspace bar (if configured). Done after the
     // Wayland socket exists so the child inherits WAYLAND_DISPLAY via the
@@ -330,6 +368,7 @@ fn default_ipc_path() -> std::path::PathBuf {
 fn start_xwayland(
     handle: smithay::reexports::calloop::LoopHandle<'static, EmskinState>,
     state: &mut EmskinState,
+    display: Option<u32>,
 ) {
     use smithay::xwayland::{XWayland, XWaylandEvent};
 
@@ -337,7 +376,7 @@ fn start_xwayland(
 
     let (xwayland, client) = match XWayland::spawn(
         &dh,
-        None,
+        display,
         std::iter::empty::<(String, String)>(),
         true,
         std::process::Stdio::null(),
@@ -451,10 +490,19 @@ fn register_clipboard_source(
     Ok(())
 }
 
-fn init_logging() {
-    if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
-    } else {
-        tracing_subscriber::fmt().init();
+fn init_logging(log_file: Option<&std::path::Path>) {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    match log_file {
+        Some(path) => match std::fs::File::create(path) {
+            Ok(file) => tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .with_env_filter(env_filter)
+                .init(),
+            Err(e) => eprintln!("failed to open --log-file {}: {e}", path.display()),
+        },
+        None => tracing_subscriber::fmt().with_env_filter(env_filter).init(),
     }
 }

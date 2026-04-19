@@ -201,7 +201,10 @@ fn detect_dead_workspaces(state: &mut EmskinState) {
     }
 
     // Detect active Emacs frame death.
-    if state.emacs_surface.as_ref().is_some_and(|s| !s.is_alive()) && state.initial_size_settled {
+    if state.detect_emacs
+        && state.emacs_surface.as_ref().is_some_and(|s| !s.is_alive())
+        && state.initial_size_settled
+    {
         if let Some(&fallback_id) = state.inactive_workspaces.keys().next() {
             tracing::info!("active Emacs died, switching to workspace {fallback_id}");
             state.switch_workspace(fallback_id);
