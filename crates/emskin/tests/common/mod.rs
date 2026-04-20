@@ -35,7 +35,15 @@ pub enum NestedHost {
 
 impl NestedHost {
     pub fn wayland() -> Self {
-        NestedHost::Wayland(WaylandHost::spawn())
+        NestedHost::Wayland(WaylandHost::spawn(false))
+    }
+
+    /// Spawn a Wayland host that hides `zwlr_data_control_v1` and
+    /// `ext_data_control_v1` from every client. Used to exercise
+    /// emskin's `wl_data_device` clipboard fallback under a KDE-like
+    /// host where data-control simply isn't advertised.
+    pub fn wayland_no_data_control() -> Self {
+        NestedHost::Wayland(WaylandHost::spawn(true))
     }
 
     pub fn x11() -> Self {
@@ -89,7 +97,7 @@ pub struct WaylandHost {
 }
 
 impl WaylandHost {
-    fn spawn() -> Self {
+    fn spawn(hide_data_control: bool) -> Self {
         let xdg = make_private_tempdir("emskin-host");
         let wayland_socket_name = format!("emskin-host-{}", unique_suffix());
         let log_file = xdg.join("emez.log");
@@ -110,9 +118,14 @@ impl WaylandHost {
         // zwlr_data_control_v1 + ext_data_control_v1 (which emskin's
         // ClipboardProxy needs) and embeds XWayland so outside X
         // clients can participate in Wayland-host clipboard tests.
+        //
+        // When `hide_data_control` is set we pass `--no-data-control` so
+        // emez stops advertising those globals entirely — simulating a
+        // KDE/GNOME host and forcing emskin onto its `wl_data_device`
+        // fallback.
         let emez_bin = find_emez_binary();
-        let child = Command::new(&emez_bin)
-            .arg("--socket")
+        let mut cmd = Command::new(&emez_bin);
+        cmd.arg("--socket")
             .arg(&wayland_socket_name)
             .arg("--log-file")
             .arg(&log_file)
@@ -120,7 +133,11 @@ impl WaylandHost {
             .arg("--xwayland-display")
             .arg(display_num.to_string())
             .arg("--xwayland-ready-file")
-            .arg(&ready_file)
+            .arg(&ready_file);
+        if hide_data_control {
+            cmd.arg("--no-data-control");
+        }
+        let child = cmd
             .env("XDG_RUNTIME_DIR", &xdg)
             .env(
                 "RUST_LOG",
@@ -163,7 +180,17 @@ impl Drop for WaylandHost {
         // child. std's `Child::kill()` sends SIGKILL, which skips Drop
         // and leaves XWayland as an orphan holding its X display socket.
         graceful_kill(&mut self.child, Duration::from_millis(1500));
-        let _ = std::fs::remove_dir_all(&self.xdg_runtime_dir);
+        // Keep the xdg_runtime_dir (and its emez.log) when
+        // EMSKIN_E2E_KEEP_LOGS is set; useful for diagnosing test
+        // failures by inspecting the emez log after the harness exits.
+        if std::env::var_os("EMSKIN_E2E_KEEP_LOGS").is_none() {
+            let _ = std::fs::remove_dir_all(&self.xdg_runtime_dir);
+        } else {
+            eprintln!(
+                "[harness] keeping host dir for inspection: {}",
+                self.xdg_runtime_dir.display()
+            );
+        }
     }
 }
 
@@ -569,7 +596,14 @@ impl Drop for Compositor {
         let _ = std::fs::remove_file(format!("/tmp/.X11-unix/X{n}"));
         let _ = std::fs::remove_file(format!("/tmp/.X{n}-lock"));
         let _ = std::fs::remove_file(&self.ipc_socket);
-        let _ = std::fs::remove_file(&self.log_file);
+        if std::env::var_os("EMSKIN_E2E_KEEP_LOGS").is_none() {
+            let _ = std::fs::remove_file(&self.log_file);
+        } else {
+            eprintln!(
+                "[harness] keeping emskin log for inspection: {}",
+                self.log_file.display()
+            );
+        }
         // self.host drops next, taking down emez/Xvfb.
     }
 }

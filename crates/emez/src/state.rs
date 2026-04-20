@@ -53,6 +53,15 @@ pub struct Emez {
     pub popups: PopupManager,
     pub seat: Seat<Self>,
 
+    /// First toplevel that mapped on this emez instance. Treated as
+    /// the "primary" focus target (emskin's winit window in tests):
+    /// after any subsequent toplevel (e.g. a transient `wl-copy`
+    /// surface) sets a selection, focus is returned here so the
+    /// emez-side `set_clipboard_focus(primary)` replays the fresh
+    /// `.selection(new_offer)` event to emskin.
+    pub primary_toplevel:
+        Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+
     // XWayland state. `xwayland_shell_state` advertises the xwayland_shell
     // global unconditionally; the rest are populated by
     // `start_xwayland` (see `src/xwayland.rs`).
@@ -68,6 +77,7 @@ impl Emez {
         event_loop: &mut EventLoop<'static, Self>,
         display: Display<Self>,
         socket: Option<&str>,
+        hide_data_control: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dh = display.handle();
 
@@ -79,11 +89,18 @@ impl Emez {
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
         // Both wlr- and ext- data-control protocols — emskin's ClipboardProxy
         // tries ext first then falls back to wlr, so advertising both means
-        // either path works.
+        // either path works. The `hide_data_control` filter returns false
+        // for every client when the CLI flag is set, simulating a KDE- or
+        // GNOME-style host that doesn't expose data-control at all.
+        let show_data_control = !hide_data_control;
         let wlr_data_control_state =
-            WlrDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
+            WlrDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), move |_| {
+                show_data_control
+            });
         let ext_data_control_state =
-            ExtDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
+            ExtDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), move |_| {
+                show_data_control
+            });
         let popups = PopupManager::default();
 
         let mut seat_state = SeatState::new();
@@ -139,6 +156,7 @@ impl Emez {
             ext_data_control_state,
             popups,
             seat,
+            primary_toplevel: None,
             xwayland_shell_state,
             xwm: None,
             xdisplay: None,

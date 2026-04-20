@@ -255,6 +255,55 @@ fn ox_to_ix() {
 }
 
 // =============================================================================
+// Stale-selection regression
+// =============================================================================
+
+/// Regression: inside XWayland owns the selection first, then an outside
+/// wayland client takes a new selection on the host. A subsequent paste
+/// inside XWayland must return the **new host** content, not the stale
+/// inside-XWayland content. The bug this guards against: when the
+/// xclip-`-i` daemon is still holding the inside X CLIPBOARD, emskin's
+/// `inject_host_selection` must call `X11Wm::new_selection` to take
+/// ownership away from that daemon so subsequent X paste requests are
+/// routed to the host selection source instead of the stale daemon.
+#[test]
+fn ix_then_ow_paste_ix_sees_ow() {
+    let s = setup();
+    let ix_text = "stale-ix";
+    let ow_text = "fresh-ow";
+
+    // Step 1: inside XWayland copies first. xclip -i forks a daemon that
+    // stays alive holding the X CLIPBOARD — do not kill it before step 3,
+    // otherwise the bug scenario disappears.
+    let mut xclip = xclip_copy(&s.emskin_xwayland_display, ix_text);
+    std::thread::sleep(DAEMON_SETTLE);
+
+    // Sanity: the inside X selection is indeed ix_text before step 2.
+    let before = xclip_paste(&s.emskin_xwayland_display);
+    assert_eq!(before, ix_text, "setup precondition failed");
+
+    // Step 2: outside Wayland client takes a new selection on the host.
+    // emskin's ClipboardProxy should observe this via data-control and
+    // replace the inside selection (both wl_data_device and X CLIPBOARD).
+    let host_wl = s
+        .compositor
+        .host_wayland()
+        .expect("wayland host has wl socket");
+    wl_copy(s.compositor.xdg_runtime_dir(), host_wl, ow_text);
+    std::thread::sleep(DAEMON_SETTLE);
+
+    // Step 3: inside XWayland paste. Must see the fresh host content,
+    // not the stale ix xclip daemon's content.
+    let got = xclip_paste(&s.emskin_xwayland_display);
+    let _ = xclip.kill();
+    let _ = xclip.wait();
+    assert_eq!(
+        got, ow_text,
+        "inside XWayland paste returned stale {ix_text:?} instead of fresh {ow_text:?}"
+    );
+}
+
+// =============================================================================
 // PRIMARY (middle-click) sanity
 // =============================================================================
 

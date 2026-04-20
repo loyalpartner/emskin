@@ -51,6 +51,13 @@ struct Cli {
     /// barrier (XWayland takes 100-300ms to finish its X11 handshake).
     #[arg(long)]
     xwayland_ready_file: Option<std::path::PathBuf>,
+
+    /// Hide the data-control globals (`zwlr_data_control_v1` +
+    /// `ext_data_control_v1`) from all clients. Simulates KDE/GNOME,
+    /// where no data-control extension is advertised. Used by E2E tests
+    /// that exercise emskin's `wl_data_device` clipboard fallback path.
+    #[arg(long, default_value_t = false)]
+    no_data_control: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,7 +66,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut event_loop: EventLoop<'static, Emez> = EventLoop::try_new()?;
     let display: Display<Emez> = Display::new()?;
-    let mut state = Emez::new(&mut event_loop, display, cli.socket.as_deref())?;
+    let mut state = Emez::new(
+        &mut event_loop,
+        display,
+        cli.socket.as_deref(),
+        cli.no_data_control,
+    )?;
 
     tracing::info!(
         "emez ready on WAYLAND_DISPLAY={}",

@@ -23,7 +23,7 @@ use smithay::{
     },
     reexports::wayland_server::{
         protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
-        Client,
+        Client, Resource,
     },
     utils::Serial,
     wayland::{
@@ -117,6 +117,21 @@ impl SeatHandler for Emez {
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        // Mirror keyboard focus into the data_device + primary_selection
+        // focus state. Without this, smithay's SeatData doesn't know which
+        // client to broadcast `.selection(new_offer)` events to — so
+        // emskin's `wl_data_device` never sees host selection changes
+        // even though the handoff in `new_selection` puts the keyboard
+        // back on emskin's surface.
+        use smithay::wayland::selection::{
+            data_device::set_data_device_focus, primary_selection::set_primary_focus,
+        };
+        let client = focused.and_then(|s| self.display_handle.get_client(s.id()).ok());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
+    }
 }
 
 impl OutputHandler for Emez {}
@@ -131,6 +146,24 @@ impl XdgShellHandler for Emez {
         // get past their first round-trip. Size is advertised by the
         // advertised output (1920x1080) but clients can pick their own.
         surface.send_configure();
+
+        // Focus handoff dance to satisfy smithay's
+        // `Request::SetSelection` focus check on `wl_data_device`:
+        //   1. First toplevel = "primary" (emskin's winit window).
+        //   2. Every new toplevel gets focus transiently so transient
+        //      `wl_data_device` clients (e.g. wl-copy on no-data-control
+        //      hosts) can call `set_selection` legally.
+        //   3. After the client fires `set_selection`, we return focus
+        //      to primary in `SelectionHandler::new_selection`, which
+        //      is where emskin ends up receiving the fresh offer.
+        let wl_surface = surface.wl_surface().clone();
+        if self.primary_toplevel.is_none() {
+            self.primary_toplevel = Some(wl_surface.clone());
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, Some(wl_surface), serial);
+        }
     }
 
     fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
@@ -174,6 +207,26 @@ impl SelectionHandler for Emez {
         if let Some(xwm) = self.xwm.as_mut() {
             if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
                 tracing::warn!(?err, ?ty, "emez: forward wayland → X new_selection");
+            }
+        }
+
+        // Focus handoff: a transient wl_data_device client (e.g. wl-copy
+        // on a no-data-control host) just set a selection while holding
+        // focus. Return focus to the primary toplevel (emskin) so the
+        // `set_data_device_focus(primary)` call in `SeatHandler::focus_changed`
+        // updates smithay's SeatData clipboard focus, then
+        // `set_clipboard_selection` broadcasts the fresh
+        // `.selection(new_offer)` to emskin's wl_data_device. Without
+        // this handoff the selection stays stranded on the transient
+        // client and emskin never sees it.
+        if ty == SelectionTarget::Clipboard {
+            if let Some(primary) = self.primary_toplevel.clone() {
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    if keyboard.current_focus().as_ref() != Some(&primary) {
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        keyboard.set_focus(self, Some(primary), serial);
+                    }
+                }
             }
         }
     }

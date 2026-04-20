@@ -2,7 +2,7 @@ use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
 
-use emskin::{clipboard, clipboard_x11, cursor_x11, ipc, state, EmskinState};
+use emskin::{clipboard, clipboard_wl, clipboard_x11, cursor_x11, ipc, state, EmskinState};
 
 static ELISP_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../elisp");
 static DEMO_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../demo");
@@ -122,8 +122,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loop_handle = event_loop.handle();
     let mut state = EmskinState::new(&mut event_loop, loop_handle, display, ipc, xkb_config)?;
 
+    register_ipc_source(&mut event_loop, &state)?;
+
+    // Open a Wayland/X11 window for our nested compositor. Must happen
+    // before clipboard init — the wl_data_device fallback piggybacks on
+    // winit's host Wayland connection to get focused-client selection
+    // events without needing our own host surface.
+    emskin::winit::init_winit(&mut event_loop, &mut state, cli.fullscreen)?;
+
     // Initialize clipboard synchronization with host compositor.
-    // Try Wayland data_control first; fall back to X11 selection protocol.
+    // Fallback chain: Wayland data-control (no-focus, preferred) →
+    // wl_data_device via winit's shared connection (focus-gated) →
+    // X11 selection (if host is Xorg).
     //
     // Test hook: `EMSKIN_DISABLE_HOST_CLIPBOARD=1` disables host clipboard
     // sync entirely. Kept as a safety valve for debugging; the E2E
@@ -132,6 +142,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("EMSKIN_DISABLE_HOST_CLIPBOARD").is_none() {
         state.selection.clipboard = clipboard::ClipboardProxy::new()
             .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
+            .or_else(|| {
+                // SAFETY: `host_wl_display_ptr` returns the wl_display
+                // owned by winit's backend. `state.backend` stays alive
+                // for the entire compositor run (dropped when main()
+                // returns), and `state.selection.clipboard` is dropped
+                // before state.backend as part of the same struct's
+                // default field-drop order — so the proxy never outlives
+                // the wl_display it borrows.
+                let ptr = host_wl_display_ptr(&state)?;
+                unsafe { clipboard_wl::WlDataDeviceProxy::new(ptr) }
+                    .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
+            })
             .or_else(|| {
                 clipboard_x11::X11ClipboardProxy::new()
                     .map(|p| Box::new(p) as Box<dyn clipboard::ClipboardBackend>)
@@ -142,11 +164,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("EMSKIN_DISABLE_HOST_CLIPBOARD set; host clipboard sync disabled");
     }
-
-    register_ipc_source(&mut event_loop, &state)?;
-
-    // Open a Wayland/X11 window for our nested compositor
-    emskin::winit::init_winit(&mut event_loop, &mut state, cli.fullscreen)?;
 
     if !cli.no_spawn {
         state.pending_command = Some(state::PendingCommand {
@@ -492,6 +509,19 @@ fn register_clipboard_source(
         )
         .map_err(|e| format!("failed to register clipboard source: {e}"))?;
     Ok(())
+}
+
+/// Return the host `wl_display` pointer from winit's backend if it's
+/// running on the Wayland platform. Returns `None` on X11 or if no
+/// backend has been initialized yet.
+fn host_wl_display_ptr(state: &EmskinState) -> Option<*mut std::ffi::c_void> {
+    use winit_crate::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+    let backend = state.backend.as_ref()?;
+    let handle = backend.window().display_handle().ok()?;
+    match handle.as_raw() {
+        RawDisplayHandle::Wayland(wl) => Some(wl.display.as_ptr()),
+        _ => None,
+    }
 }
 
 fn init_logging(log_file: Option<&std::path::Path>) {

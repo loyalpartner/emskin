@@ -2,6 +2,7 @@ pub mod apps;
 pub mod capture;
 pub mod clipboard;
 pub mod clipboard_dispatch;
+pub mod clipboard_wl;
 pub mod clipboard_x11;
 pub mod cursor_x11;
 pub mod focus;

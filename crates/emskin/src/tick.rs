@@ -54,11 +54,20 @@ pub fn event_loop_tick(state: &mut EmskinState) {
     state.ipc.flush();
 
     // --- Process clipboard events from host compositor ---
+    // Drive `dispatch()` on every tick. For data-control / X11 backends
+    // this is idempotent (calloop fd-source already dispatched on
+    // readable). For the wl_data_device fallback (shared connection,
+    // no owned fd) this tick call is the ONLY drain point — winit reads
+    // the shared fd, events enqueue internally, and we must convert
+    // them into ClipboardEvents before `take_events`.
     let clipboard_events = state
         .selection
         .clipboard
         .as_mut()
-        .map(|c| c.take_events())
+        .map(|c| {
+            c.dispatch();
+            c.take_events()
+        })
         .unwrap_or_default();
     let has_clipboard_events = !clipboard_events.is_empty();
     for event in clipboard_events {
