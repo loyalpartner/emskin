@@ -57,6 +57,10 @@ struct Cli {
     #[arg(long)]
     standalone: bool,
 
+    /// Request fullscreen for the host compositor window on startup.
+    #[arg(long)]
+    fullscreen: bool,
+
     /// How to launch the external workspace bar:
     ///   * `auto`  — find `emskin-bar` next to this binary or on PATH (default)
     ///   * `none`  — don't launch a bar (user manages their own / doesn't want one)
@@ -142,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     register_ipc_source(&mut event_loop, &state)?;
 
     // Open a Wayland/X11 window for our nested compositor
-    emskin::winit::init_winit(&mut event_loop, &mut state)?;
+    emskin::winit::init_winit(&mut event_loop, &mut state, cli.fullscreen)?;
 
     if !cli.no_spawn {
         state.pending_command = Some(state::PendingCommand {

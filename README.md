@@ -211,6 +211,7 @@ Without `--standalone`, load the elisp manually:
 emskin [OPTIONS]
 
   --standalone            Standalone mode: auto-load built-in elisp
+  --fullscreen            Request fullscreen for the host compositor window on startup
   --no-spawn              Don't start Emacs; wait for external connection
   --command <CMD>         Program to launch (default: "emacs")
   --arg <ARG>             Arguments for --command (repeatable)

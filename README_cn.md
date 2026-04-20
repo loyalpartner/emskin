@@ -203,6 +203,7 @@ IPC 建立时自动同步变量值给合成器，`setq` 原样就生效；如果
 emskin [OPTIONS]
 
   --standalone            独立模式，自动加载内置 elisp（推荐初次体验）
+  --fullscreen            启动时请求宿主 compositor 窗口全屏
   --no-spawn              不启动 Emacs，等待外部连接
   --command <CMD>         启动命令 (默认: "emacs")
   --arg <ARG>             命令参数 (可多次指定)

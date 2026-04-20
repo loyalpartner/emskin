@@ -377,11 +377,21 @@ fn post_render(state: &mut EmskinState, output: &Output) {
 pub fn init_winit(
     event_loop: &mut EventLoop<EmskinState>,
     state: &mut EmskinState,
+    fullscreen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut backend, winit) = winit::init()?;
-
-    backend.window().set_title("Emacs");
-    backend.window().set_maximized(true);
+    let attributes = winit_crate::window::Window::default_attributes()
+        .with_inner_size(winit_crate::dpi::LogicalSize::new(1280.0, 800.0))
+        .with_title("Emacs")
+        .with_visible(true);
+    let (mut backend, winit) = winit::init_from_attributes(attributes)?;
+    if fullscreen {
+        backend
+            .window()
+            .set_fullscreen(Some(winit_crate::window::Fullscreen::Borderless(None)));
+        state.pending_fullscreen = Some(true);
+    } else {
+        backend.window().set_maximized(true);
+    }
 
     let mode = make_mode(backend.window_size());
 
