@@ -1,4 +1,8 @@
-use std::{ffi::OsString, sync::Arc};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    sync::Arc,
+};
 
 use smithay::{
     delegate_xwayland_shell,
@@ -28,6 +32,7 @@ use smithay::{
         shell::xdg::XdgShellState,
         shm::ShmState,
         socket::ListeningSocketSource,
+        xdg_activation::XdgActivationState,
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
     },
     xwayland::X11Wm,
@@ -50,17 +55,43 @@ pub struct Emez {
     pub primary_selection_state: PrimarySelectionState,
     pub wlr_data_control_state: WlrDataControlState,
     pub ext_data_control_state: ExtDataControlState,
+    pub xdg_activation_state: XdgActivationState,
     pub popups: PopupManager,
     pub seat: Seat<Self>,
 
-    /// First toplevel that mapped on this emez instance. Treated as
-    /// the "primary" focus target (emskin's winit window in tests):
-    /// after any subsequent toplevel (e.g. a transient `wl-copy`
-    /// surface) sets a selection, focus is returned here so the
-    /// emez-side `set_clipboard_focus(primary)` replays the fresh
-    /// `.selection(new_offer)` event to emskin.
-    pub primary_toplevel:
-        Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+    /// When true, drain wl_data_device selections into compositor memory
+    /// so short-lived clients (wl-copy) can exit cleanly without losing
+    /// the selection. Enabled only when data-control is hidden (the
+    /// simulated KDE/GNOME scenario where wl_data_device is the only
+    /// clipboard path); under data-control mode every clipboard client
+    /// is expected to be long-lived and running the manager is
+    /// counterproductive — it would hijack selections set by well-
+    /// behaved DC clients like emskin itself.
+    pub clipboard_manager_enabled: bool,
+
+    /// Buffered clipboard contents held on behalf of short-lived client
+    /// sources. When a client (e.g. `wl-copy --foreground`) publishes a
+    /// selection, emez reads every offered mime into memory via
+    /// `request_data_device_client_selection` and then takes over with
+    /// `set_data_device_selection(..., ())` so the selection survives
+    /// after the originating client exits. This is the wayland
+    /// equivalent of X11's CLIPBOARD_MANAGER / SAVE_TARGETS mechanism
+    /// — without it, wl_data_source ownership is tied to the client's
+    /// lifetime, forcing tools like wl-copy to fork a daemon.
+    pub clipboard_buffer: HashMap<String, Vec<u8>>,
+
+    /// Mime types currently published by the compositor-owned selection
+    /// (matches `clipboard_buffer.keys()` but preserves offer order).
+    pub clipboard_mimes: Vec<String>,
+
+    /// "Primary" focus target — the first surface to get focus through
+    /// `xdg_activation_v1.activate`. When the current focused surface
+    /// is destroyed or explicitly unfocused, emez falls back to this
+    /// one. Mirrors what real compositors do: focus doesn't just evaporate
+    /// when a window closes, it returns to the previous in-use window.
+    pub primary_fallback_focus: Option<
+        smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    >,
 
     // XWayland state. `xwayland_shell_state` advertises the xwayland_shell
     // global unconditionally; the rest are populated by
@@ -101,6 +132,13 @@ impl Emez {
             ExtDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), move |_| {
                 show_data_control
             });
+        // xdg_activation_v1: how clients (e.g. wl-copy) legitimately
+        // acquire keyboard focus on compositors that don't auto-focus
+        // new toplevels (GNOME Mutter, strict focus-stealing-prevention
+        // KWin configs). emez accepts any token — the tests rely on
+        // clients reading `XDG_ACTIVATION_TOKEN` from the env and
+        // calling `xdg_activation_v1.activate` to pull focus themselves.
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let popups = PopupManager::default();
 
         let mut seat_state = SeatState::new();
@@ -154,9 +192,13 @@ impl Emez {
             primary_selection_state,
             wlr_data_control_state,
             ext_data_control_state,
+            xdg_activation_state,
             popups,
             seat,
-            primary_toplevel: None,
+            clipboard_manager_enabled: hide_data_control,
+            clipboard_buffer: HashMap::new(),
+            clipboard_mimes: Vec::new(),
+            primary_fallback_focus: None,
             xwayland_shell_state,
             xwm: None,
             xdisplay: None,

@@ -22,11 +22,20 @@ use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
 };
+use smithay::wayland::selection::ext_data_control::{
+    DataControlHandler as ExtDataControlHandler, DataControlState as ExtDataControlState,
+};
 use smithay::wayland::selection::primary_selection::{
     set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
 };
+use smithay::wayland::selection::wlr_data_control::{
+    DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
+};
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
-use smithay::{delegate_data_device, delegate_output, delegate_primary_selection, delegate_seat};
+use smithay::{
+    delegate_data_control, delegate_data_device, delegate_ext_data_control, delegate_output,
+    delegate_primary_selection, delegate_seat,
+};
 
 impl SeatHandler for EmskinState {
     type KeyboardFocus = KeyboardFocusTarget;
@@ -298,6 +307,26 @@ impl WaylandDndGrabHandler for EmskinState {
 }
 
 delegate_data_device!(EmskinState);
+
+//
+// wlr/ext data_control — exposes zwlr_data_control_v1 and ext_data_control_v1
+// to internal clients so they can exchange selections without keyboard focus.
+//
+
+impl WlrDataControlHandler for EmskinState {
+    fn data_control_state(&mut self) -> &mut WlrDataControlState {
+        &mut self.wl.wlr_data_control_state
+    }
+}
+
+impl ExtDataControlHandler for EmskinState {
+    fn data_control_state(&mut self) -> &mut ExtDataControlState {
+        &mut self.wl.ext_data_control_state
+    }
+}
+
+delegate_data_control!(EmskinState);
+delegate_ext_data_control!(EmskinState);
 
 //
 // Primary Selection

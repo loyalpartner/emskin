@@ -58,6 +58,16 @@ struct Cli {
     /// that exercise emskin's `wl_data_device` clipboard fallback path.
     #[arg(long, default_value_t = false)]
     no_data_control: bool,
+
+    /// Pre-seed one external `xdg_activation_v1` token and write its
+    /// string to this file. Clients (emskin, wl-copy, wl-paste) read
+    /// `XDG_ACTIVATION_TOKEN` from the env and call
+    /// `xdg_activation_v1.activate(token, surface)` to pull keyboard
+    /// focus — the only protocol-legal focus path now that emez no
+    /// longer auto-focuses new toplevels. The token is reusable across
+    /// activate requests for the whole emez run.
+    #[arg(long)]
+    activation_token_file: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,6 +87,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "emez ready on WAYLAND_DISPLAY={}",
         state.socket_name.to_string_lossy()
     );
+
+    // Pre-seed one activation token if requested and write its string to
+    // the caller-provided path. Harness reads this file and exports it
+    // as XDG_ACTIVATION_TOKEN to every child process that needs a
+    // legitimate focus path (emskin itself, wl-copy, wl-paste).
+    if let Some(ref path) = cli.activation_token_file {
+        let (token, _) = state.xdg_activation_state.create_external_token(None);
+        let token_str: String = token.clone().into();
+        match std::fs::write(path, &token_str) {
+            Ok(()) => tracing::info!(
+                "emez wrote activation token to {} ({})",
+                path.display(),
+                token_str
+            ),
+            Err(e) => tracing::error!(
+                "emez failed to write activation token to {}: {e}",
+                path.display()
+            ),
+        }
+    }
 
     if cli.xwayland {
         state.start_xwayland(cli.xwayland_display, cli.xwayland_ready_file.clone())?;
