@@ -101,10 +101,13 @@ rather than assuming the elisp toggle is the single source of truth."
       (setq-local cursor-type nil)
       (add-hook 'kill-buffer-hook #'emskin--kill-buffer-hook nil t)
       (add-hook 'post-command-hook #'emskin--post-command-prefix-done nil t))
-    (display-buffer buf '((display-buffer-pop-up-window
-                           display-buffer-use-some-window)
-                          (inhibit-same-window . t)
-                          (reusable-frames . nil)))
+    (let ((target (emskin--take-native-app-target-window)))
+      (if target
+          (set-window-buffer target buf)
+        (display-buffer buf '((display-buffer-pop-up-window
+                               display-buffer-use-some-window)
+                              (inhibit-same-window . t)
+                              (reusable-frames . nil)))))
     (when-let ((win (get-buffer-window buf t)))
       (set-window-scroll-bars win 0 nil 0 nil)
       (emskin--report-geometry window-id win))

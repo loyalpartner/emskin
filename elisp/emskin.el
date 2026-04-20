@@ -107,6 +107,13 @@ Key: window-id.  Value: (SOURCE-WIN . ((VIEW-ID . EMACS-WIN) ...)).")
 (defvar emskin--next-view-id 0
   "Counter for generating unique mirror view IDs.")
 
+(defvar emskin--pending-native-app-targets nil
+  "FIFO queue of windows reserved for newly created native app buffers.
+Each `emskin-open-native-app' call appends the currently selected window.
+When the compositor later emits `window_created', emskin tries to display
+the new app buffer in the oldest still-live queued window before falling
+back to the generic `display-buffer' path.")
+
 ;; --- Workspace tracking ---
 (defvar emskin--frame-workspace-table (make-hash-table :test 'eq)
   "Maps Emacs frame objects to compositor workspace IDs.")
@@ -152,6 +159,15 @@ sync on every flip."
 ;; App launching
 ;; ---------------------------------------------------------------------------
 
+(defun emskin--take-native-app-target-window ()
+  "Return and dequeue the next live target window for a native app."
+  (let (target)
+    (while (and emskin--pending-native-app-targets
+                (not (window-live-p target)))
+      (setq target (pop emskin--pending-native-app-targets)))
+    (when (window-live-p target)
+      target)))
+
 (defun emskin-open-app (app-name)
   "Launch embedded application APP-NAME (Python script in `emskin-demo-dir')."
   (interactive "sApp name: ")
@@ -165,11 +181,20 @@ sync on every flip."
   "Launch a native Wayland application inside emskin.
 COMMAND is a shell command string, e.g. \"foot\" or \"firefox\"."
   (interactive "sCommand: ")
-  (let ((args (split-string-and-unquote command)))
-    (apply #'start-process
-           (format "emskin-%s" (car args))
-           nil args)
-    (message "emskin: launched native app: %s" command)))
+  (let* ((args (split-string-and-unquote command))
+         (target (selected-window))
+         (old-targets emskin--pending-native-app-targets))
+    (setq emskin--pending-native-app-targets
+          (append emskin--pending-native-app-targets (list target)))
+    (condition-case err
+        (progn
+          (apply #'start-process
+                 (format "emskin-%s" (car args))
+                 nil args)
+          (message "emskin: launched native app: %s" command))
+      (error
+       (setq emskin--pending-native-app-targets old-targets)
+       (signal (car err) (cdr err))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Auto-connect when running inside emskin
