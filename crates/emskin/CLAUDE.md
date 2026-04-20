@@ -36,7 +36,7 @@
 - ext-workspace-v1 protocol: `protocols/workspace.rs` — diff-based refresh model, action queue for client requests. Compositor is the single source of truth; IPC and protocol operate on same workspace state
 - IPC extensions: Emacs→compositor: `switch_workspace`. Compositor→Emacs: `workspace_created`, `workspace_switched`, `workspace_destroyed`
 - EmskinState sub-structs: `wl: WaylandState` (17 smithay protocol fields), `focus: FocusState` (prefix_saved_focus, text_input_focus, pending_ime_allowed, layer_saved_focus), `selection: SelectionState` (clipboard, origins, cached mimes). Handler impls access via `self.wl.compositor_state` etc.
-- ClipboardBackend trait: replaces HostClipboard enum dispatch. `ClipboardProxy` (Wayland) and `X11ClipboardProxy` both impl the trait. State field: `Option<Box<dyn ClipboardBackend>>`
+- ClipboardBackend trait: replaces HostClipboard enum dispatch. `ClipboardProxy` (Wayland data-control, `clipboard.rs`), `WlDataDeviceProxy` (Wayland wl_data_device fallback, `clipboard_wl.rs`), and `X11ClipboardProxy` (`clipboard_x11.rs`) all impl the trait. State field: `Option<Box<dyn ClipboardBackend>>`. Fallback chain on Wayland: ext-data-control → wlr-data-control → wl_data_device → X11. Created in `main.rs`; wl_data_device fallback piggybacks on winit's shared wl_display via `Backend::from_foreign_display`.
 - IpcRect: shared `{x, y, w, h}` struct with `#[serde(flatten)]` — replaces repeated bare fields in SetGeometry, AddMirror, UpdateMirrorGeometry, SkeletonClicked, SkeletonRect
 - Module layout: `lib.rs` (library entry), `tick.rs` (event loop body), `ipc/dispatch.rs` (IPC message handlers), `clipboard_dispatch.rs` (clipboard event bridge), `mirror_render.rs` (mirror texture rendering)
 - Overlays live in the `effect-plugins` crate (measure / skeleton / splash). The host keeps `Rc<RefCell<T>>` handles and registers them into `state.effect_chain` via `effect_core::EffectHandle`. Typed pub methods drive state (`set_enabled`, `set_rects`, `dismiss`, `click_at`); the `Effect` trait itself is purely visual. See `../effect-plugins/CLAUDE.md`.
@@ -112,9 +112,10 @@
 
 ## Wayland Protocols Implemented
 - xdg_shell (toplevel, popup)
-- xdg-decoration (force ServerSide — no decorations drawn). xdg_activation intentionally NOT implemented — focus is managed by compositor auto-focus + Emacs IPC
+- xdg-decoration (force ServerSide — no decorations drawn). xdg_activation_v1 is implemented **client-side only** (`main.rs::activate_main_surface_if_env_token` reads `XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID` from env and calls `activate(token, main_surface)` on the host — mirrors GNOME/KWin startup-notification). Compositor-side server for internal clients is intentionally NOT implemented; internal clients that want focus should rely on compositor auto-focus + Emacs IPC.
 - wl_seat (keyboard + pointer)
-- wl_data_device (DnD)
+- wl_data_device (DnD + selection for internal clients)
+- **wlr_data_control_v1 + ext_data_control_v1** for internal clients — exposes the focus-less clipboard path to embedded apps (Firefox, Electron, wl-clipboard, screen-grabs). Mirrors what real wlroots / KDE ≥ 6.2 do. Matters because without this, internal wl-copy / wl-paste would be forced onto wl_data_device's focus-gated path inside emskin and fail whenever the active internal client doesn't hold keyboard focus.
 - fractional_scale, viewporter
 - text_input_v3 (IME bridge to host — see smithay fork patches)
 - wp_cursor_shape_v1 (cursor shape forwarding to host — Named icons via winit, Surface falls back to default)
@@ -132,7 +133,8 @@
   - `tests/common/mod.rs` — `NestedHost` + `Compositor::spawn_on` + test-client helpers (`wl_copy`/`wl_paste`/`xclip_copy`/`xclip_paste` + primary variants) + `DisplaySlot` reservation pool + `graceful_kill`. `find_emez_binary()` locates `target/<profile>/emez` at runtime (cargo doesn't set `CARGO_BIN_EXE_<name>` across crates).
   - `tests/e2e_smoke.rs` — 2 tests (IPC handshake + SetMeasure survival).
   - `tests/e2e_capture.rs` — 2 tests (screenshot PNG, recording mp4). emez sends frame callbacks immediately on commit so emskin's winit render loop stays active.
-  - `tests/e2e_clipboard_wayland.rs` — 13 tests, full matrix under Wayland host (emez). Covers `zwlr_data_control_v1` path in emskin's `clipboard.rs` plus emez's own XWayland for the external-X cells.
+  - `tests/e2e_clipboard_wayland.rs` — 14 tests, full matrix under Wayland host (emez). Covers `zwlr_data_control_v1` path in emskin's `clipboard.rs` plus emez's own XWayland for the external-X cells.
+  - `tests/e2e_clipboard_wayland_no_data_control.rs` — 4 tests under emez's `--no-data-control` mode, exercising emskin's `wl_data_device` fallback (`clipboard_wl.rs`) on a simulated KDE < 6.2 / GNOME Mutter host. Test clients (wl-copy, wl-paste) and emskin itself all inherit a shared `XDG_ACTIVATION_TOKEN` from the harness; emez's built-in clipboard manager lets short-lived wl-copy exit after set_selection without daemon fork.
   - `tests/e2e_clipboard_x11.rs` — 5 tests covering the 外X combinations under Xvfb host. Covers the X11 fallback in emskin's `clipboard_x11.rs`.
 - E2E compositor CLI combo: `--no-spawn --bar none --ipc-path <path> --log-file <path> --wayland-socket <name>`. `--log-file` redirects tracing to a file (harness dumps it on panic, keeps cargo test output clean).
 - Test-mode knobs (set by `tests/common/mod.rs`, not production defaults):

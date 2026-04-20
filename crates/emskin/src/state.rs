@@ -28,6 +28,10 @@ use smithay::{
             wlr_layer::WlrLayerShellState,
             xdg::{decoration::XdgDecorationState, ToplevelSurface, XdgShellState},
         },
+        selection::{
+            ext_data_control::DataControlState as ExtDataControlState,
+            wlr_data_control::DataControlState as WlrDataControlState,
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
@@ -102,6 +106,14 @@ pub struct WaylandState {
     pub layer_shell_state: WlrLayerShellState,
     pub xwayland_shell_state: XWaylandShellState,
     pub cursor_shape_manager_state: CursorShapeManagerState,
+    /// Advertise `zwlr_data_control_v1` and `ext_data_control_v1` to
+    /// emskin's own internal clients so they can exchange selections
+    /// without needing keyboard focus. Mirrors what real wlroots /
+    /// cosmic / KDE ≥ 6.2 do for their clients, and lets tools like
+    /// wl-copy / wl-paste inside emskin skip the wl_data_device focus
+    /// dance entirely.
+    pub wlr_data_control_state: WlrDataControlState,
+    pub ext_data_control_state: ExtDataControlState,
     pub dmabuf_state: DmabufState,
     /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
     pub dmabuf_global: Option<DmabufGlobal>,
@@ -307,6 +319,15 @@ impl EmskinState {
 
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // Always expose DC to internal clients — internal clients
+        // (Firefox, Electron apps, wl-clipboard, screen-grabs) prefer
+        // DC over wl_data_device and therefore never need keyboard
+        // focus to exchange selections with one another. Mirrors what
+        // wlroots / cosmic / KDE ≥ 6.2 do for their clients.
+        let wlr_data_control_state =
+            WlrDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
+        let ext_data_control_state =
+            ExtDataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |_| true);
 
         let mut seat_state = SeatState::new();
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
@@ -391,6 +412,8 @@ impl EmskinState {
                 layer_shell_state,
                 xwayland_shell_state,
                 cursor_shape_manager_state,
+                wlr_data_control_state,
+                ext_data_control_state,
                 dmabuf_state,
                 dmabuf_global: None,
                 text_input_manager_state,

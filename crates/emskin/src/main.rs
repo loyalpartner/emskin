@@ -130,6 +130,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // events without needing our own host surface.
     emskin::winit::init_winit(&mut event_loop, &mut state, cli.fullscreen)?;
 
+    // Claim keyboard focus on the host via xdg_activation_v1 if we
+    // inherited an XDG_ACTIVATION_TOKEN / DESKTOP_STARTUP_ID — real
+    // GNOME/KWin startup-notification path, and the only way to get
+    // focus on hosts that don't auto-focus new toplevels (Mutter).
+    // No-op if env is empty or host lacks xdg_activation_v1.
+    activate_main_surface_if_env_token(&state);
+
     // Initialize clipboard synchronization with host compositor.
     // Fallback chain: Wayland data-control (no-focus, preferred) →
     // wl_data_device via winit's shared connection (focus-gated) →
@@ -522,6 +529,133 @@ fn host_wl_display_ptr(state: &EmskinState) -> Option<*mut std::ffi::c_void> {
         RawDisplayHandle::Wayland(wl) => Some(wl.display.as_ptr()),
         _ => None,
     }
+}
+
+/// Return the host `wl_surface` pointer of emskin's winit main window
+/// if running on Wayland. Used together with `host_wl_display_ptr` to
+/// call `xdg_activation_v1.activate` on the main surface.
+fn host_wl_surface_ptr(state: &EmskinState) -> Option<*mut std::ffi::c_void> {
+    use winit_crate::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let backend = state.backend.as_ref()?;
+    let handle = backend.window().window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Wayland(wl) => Some(wl.surface.as_ptr()),
+        _ => None,
+    }
+}
+
+/// If `XDG_ACTIVATION_TOKEN` (or `DESKTOP_STARTUP_ID`) is present in the
+/// environment and the host compositor advertises
+/// `xdg_activation_v1`, call `activate(token, main_surface)` to move
+/// keyboard focus to emskin's main window. This is the protocol-legal
+/// startup-notification path real Mutter / KWin both honour (and the
+/// only focus path emez gives us now that it no longer auto-focuses
+/// new toplevels).
+///
+/// Does nothing on X11, when the token is absent, or when the host
+/// lacks `xdg_activation_v1`. Runs as a short self-contained event
+/// loop (bind → activate → roundtrip → drop) — the activation token
+/// itself stays valid for the emez / host compositor run; we don't
+/// need to keep our wayland connection alive.
+fn activate_main_surface_if_env_token(state: &EmskinState) {
+    use wayland_client::backend::{Backend, ObjectId};
+    use wayland_client::protocol::wl_registry;
+    use wayland_client::protocol::wl_surface::WlSurface;
+    use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
+    use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::{self, XdgActivationV1};
+
+    let Some(token) = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("DESKTOP_STARTUP_ID").ok())
+    else {
+        return;
+    };
+    let Some(display_ptr) = host_wl_display_ptr(state) else {
+        return;
+    };
+    let Some(surface_ptr) = host_wl_surface_ptr(state) else {
+        return;
+    };
+
+    // SAFETY: display_ptr + surface_ptr come from winit's raw-window-handle,
+    // both valid for at least the duration of this short sync.
+    let backend = unsafe { Backend::from_foreign_display(display_ptr.cast()) };
+    let connection = Connection::from_backend(backend);
+
+    struct State {
+        activation: Option<XdgActivationV1>,
+    }
+    impl Dispatch<wl_registry::WlRegistry, ()> for State {
+        fn event(
+            state: &mut Self,
+            registry: &wl_registry::WlRegistry,
+            event: wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            qh: &QueueHandle<Self>,
+        ) {
+            if let wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } = event
+            {
+                if interface == "xdg_activation_v1" && state.activation.is_none() {
+                    state.activation = Some(registry.bind(name, version.min(1), qh, ()));
+                }
+            }
+        }
+    }
+    impl Dispatch<XdgActivationV1, ()> for State {
+        fn event(
+            _: &mut Self,
+            _: &XdgActivationV1,
+            _: xdg_activation_v1::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    let mut queue = connection.new_event_queue::<State>();
+    let qh = queue.handle();
+    let _registry = connection.display().get_registry(&qh, ());
+    let mut st = State { activation: None };
+
+    if let Err(e) = queue.roundtrip(&mut st) {
+        tracing::debug!("xdg_activation roundtrip failed: {e}");
+        return;
+    }
+
+    let Some(activation) = st.activation.as_ref() else {
+        tracing::debug!("host does not advertise xdg_activation_v1; skip self-activate");
+        return;
+    };
+
+    // Wrap the raw wl_surface pointer from winit into a proxy on this
+    // connection. SAFETY: surface_ptr is a live wl_surface proxy from
+    // winit, and we only use this wrapped handle to issue one request
+    // (`activate`) that doesn't destroy or mutate its state.
+    let Ok(surface_id) =
+        (unsafe { ObjectId::from_ptr(WlSurface::interface(), surface_ptr.cast()) })
+    else {
+        tracing::debug!("failed to wrap wl_surface ptr into proxy id");
+        return;
+    };
+    let Ok(surface) = WlSurface::from_id(&connection, surface_id) else {
+        tracing::debug!("failed to construct WlSurface proxy from id");
+        return;
+    };
+
+    activation.activate(token.clone(), &surface);
+    if let Err(e) = connection.flush() {
+        tracing::warn!("xdg_activation flush failed: {e}");
+    }
+    // One roundtrip so the activate request actually leaves our queue
+    // before we drop the connection.
+    let _ = queue.roundtrip(&mut st);
+    tracing::info!("requested self-activation via xdg_activation_v1 (token bytes={})", token.len());
 }
 
 fn init_logging(log_file: Option<&std::path::Path>) {

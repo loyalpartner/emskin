@@ -19,6 +19,25 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Filename emez writes its pre-seeded `xdg_activation_v1` token to
+/// (inside each host's private `XDG_RUNTIME_DIR`). The harness reads
+/// it back and exports `XDG_ACTIVATION_TOKEN` to every spawned client
+/// that needs a focus path (emskin, wl-copy, wl-paste).
+const ACTIVATION_TOKEN_FILE: &str = "emez-activation-token";
+
+/// Common wayland-client env setup for wl-copy / wl-paste subprocesses.
+/// The token (if present) lets clients self-activate via
+/// `xdg_activation_v1.activate` on emez, which matches real
+/// GNOME/KWin startup-notification focus.
+fn configure_wl_clipboard_env(cmd: &mut Command, xdg: &Path, socket: &str) {
+    cmd.env("XDG_RUNTIME_DIR", xdg)
+        .env("WAYLAND_DISPLAY", socket)
+        .env_remove("WAYLAND_SOCKET");
+    if let Ok(tok) = std::fs::read_to_string(xdg.join(ACTIVATION_TOKEN_FILE)) {
+        cmd.env("XDG_ACTIVATION_TOKEN", tok);
+    }
+}
+
 // =============================================================================
 // NestedHost — private emez or Xvfb per test
 // =============================================================================
@@ -73,6 +92,16 @@ impl NestedHost {
         }
     }
 
+    /// Pre-seeded `xdg_activation_v1` token string to hand to any child
+    /// process that needs to self-activate via the startup-notification
+    /// path. Returns `None` on X11 hosts (no Wayland → no xdg_activation).
+    pub fn activation_token(&self) -> Option<&str> {
+        match self {
+            NestedHost::Wayland(w) => Some(w.activation_token.as_str()),
+            NestedHost::X11(_) => None,
+        }
+    }
+
     pub fn log_tail(&self) -> String {
         match self {
             NestedHost::Wayland(w) => std::fs::read_to_string(&w.log_file)
@@ -90,6 +119,11 @@ pub struct WaylandHost {
     wayland_socket_name: String,
     log_file: PathBuf,
     display: String,
+    /// Reusable `xdg_activation_v1` token pre-seeded by emez; every
+    /// client that needs host keyboard focus (emskin, wl-copy, wl-paste)
+    /// inherits this via `XDG_ACTIVATION_TOKEN`. Empty when emez didn't
+    /// write a token (shouldn't happen — we always pass the flag).
+    activation_token: String,
     // Drop order: child dies first (signal + wait), then this slot
     // releases its DISPLAY number back to the pool so the next test can
     // grab it. Keep this field *after* `child` in declaration order.
@@ -123,6 +157,16 @@ impl WaylandHost {
         // emez stops advertising those globals entirely — simulating a
         // KDE/GNOME host and forcing emskin onto its `wl_data_device`
         // fallback.
+        // Pre-seed an activation token and pass the file path to emez.
+        // Real GNOME/KWin expect startup-notified apps to inherit a
+        // valid XDG_ACTIVATION_TOKEN and self-activate their surface
+        // via `xdg_activation_v1`. Since emez no longer auto-focuses
+        // new toplevels (deliberate — real compositors don't either,
+        // at least not unconditionally), every test client that needs
+        // focus (emskin main window, wl-copy, wl-paste) reads this
+        // token out of env and self-activates.
+        let token_file = xdg.join(ACTIVATION_TOKEN_FILE);
+
         let emez_bin = find_emez_binary();
         let mut cmd = Command::new(&emez_bin);
         cmd.arg("--socket")
@@ -133,7 +177,9 @@ impl WaylandHost {
             .arg("--xwayland-display")
             .arg(display_num.to_string())
             .arg("--xwayland-ready-file")
-            .arg(&ready_file);
+            .arg(&ready_file)
+            .arg("--activation-token-file")
+            .arg(&token_file);
         if hide_data_control {
             cmd.arg("--no-data-control");
         }
@@ -162,12 +208,27 @@ impl WaylandHost {
             )
         });
 
+        // Read the pre-seeded activation token emez wrote on startup.
+        // Small budget: emez writes this synchronously after creating
+        // the external token, right before XWayland starts. If XWayland
+        // is ready but this file is still missing, something's wrong.
+        let activation_token = wait_for_path(&token_file, Duration::from_secs(2))
+            .and_then(|_| std::fs::read_to_string(&token_file).ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "emez never wrote activation token to {} (log: {})",
+                    token_file.display(),
+                    log_file.display()
+                )
+            });
+
         Self {
             child,
             xdg_runtime_dir: xdg,
             wayland_socket_name,
             log_file,
             display,
+            activation_token,
             _display_slot: display_slot,
         }
     }
@@ -475,6 +536,13 @@ impl Compositor {
         // X11 host: leave WAYLAND_DISPLAY unset → winit falls back to X11.
         if let Some(sock) = host.wayland_socket() {
             cmd.env("WAYLAND_DISPLAY", sock);
+            // Pass the host's pre-seeded xdg_activation token so emskin
+            // can self-activate its main window. Mirrors how GNOME/KWin
+            // pass a startup-notification token to apps launched via
+            // DBus activation or shell exec.
+            if let Some(tok) = host.activation_token() {
+                cmd.env("XDG_ACTIVATION_TOKEN", tok);
+            }
         } else {
             cmd.env_remove("WAYLAND_DISPLAY");
         }
@@ -689,16 +757,19 @@ pub fn wl_copy_primary(xdg: &Path, socket: &str, text: &str) {
 }
 
 fn wl_copy_inner(xdg: &Path, socket: &str, text: &str, extra_args: &[&str]) {
+    // Default wl-copy forks a daemon to hold the selection and returns
+    // immediately. The daemon lives until something replaces the
+    // selection — in WD fallback tests that's emez's clipboard-manager
+    // drain (cancels the daemon); in DC tests the daemon just lingers
+    // until test teardown. `--foreground` is deliberately NOT passed —
+    // it would block on cancel which never arrives in DC tests.
     let mut cmd = Command::new("wl-copy");
     for a in extra_args {
         cmd.arg(a);
     }
+    cmd.arg("--").arg(text);
+    configure_wl_clipboard_env(&mut cmd, xdg, socket);
     let status = cmd
-        .arg("--")
-        .arg(text)
-        .env("XDG_RUNTIME_DIR", xdg)
-        .env("WAYLAND_DISPLAY", socket)
-        .env_remove("WAYLAND_SOCKET")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -723,11 +794,9 @@ fn wl_paste_inner(xdg: &Path, socket: &str, extra_args: &[&str]) -> String {
     for a in extra_args {
         cmd.arg(a);
     }
+    cmd.arg("--no-newline");
+    configure_wl_clipboard_env(&mut cmd, xdg, socket);
     let output = cmd
-        .arg("--no-newline")
-        .env("XDG_RUNTIME_DIR", xdg)
-        .env("WAYLAND_DISPLAY", socket)
-        .env_remove("WAYLAND_SOCKET")
         .stderr(Stdio::piped())
         .output()
         .expect("spawn wl-paste");

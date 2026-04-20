@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 # SIGTERM/SIGINT without relying on async-signal-safe primitives inside
 # the handler itself.
 signal-hook = "0.3"
+libc = "0.2.185"
 
 [[bin]]
 name = "emez"

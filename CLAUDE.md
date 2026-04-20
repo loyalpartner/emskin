@@ -53,7 +53,10 @@ Deeper per-crate notes live in each `crates/*/CLAUDE.md`.
 
 E2E tests each spawn their own private host compositor — **emez**
 (`crates/emez/`, a smithay-based headless wayland host with
-data-control) for Wayland-host tests, Xvfb for X11-host tests — so
+data-control, wl_data_device fallback mode via `--no-data-control`,
+`xdg_activation_v1`, and an internal clipboard manager that lets
+short-lived clients like `wl-copy` exit cleanly without forking a
+daemon) for Wayland-host tests, Xvfb for X11-host tests — so
 tests run in full isolation from the developer's desktop. Invoke
 directly with cargo:
 
