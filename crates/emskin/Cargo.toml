@@ -57,7 +57,11 @@ exactly = 1
 
 [package.metadata.aur]
 depends = ["wayland", "libxkbcommon", "libxkbcommon-x11", "mesa", "libinput", "seatd", "fontconfig", "freetype2", "xorg-xwayland"]
-optdepends = ["emacs-wayland: pgtk Emacs (recommended)", "emacs: X11 Emacs (works via XWayland)"]
+optdepends = [
+    "emacs-wayland: pgtk Emacs (recommended)",
+    "emacs: X11 Emacs (works via xwayland-satellite)",
+    "xwayland-satellite: on-demand XWayland supervisor for embedding X11 apps (required for any X client; without it the compositor runs Wayland-only)",
+]
 files = [
     ["assets/emskin.desktop", "/usr/share/applications/emskin.desktop"],
     ["assets/emskin.png", "/usr/share/pixmaps/emskin.png"],
