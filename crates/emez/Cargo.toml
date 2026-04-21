@@ -8,7 +8,29 @@ repository.workspace = true
 description = "Minimal smithay-based wayland compositor used as a controllable test host for emskin's E2E suite."
 
 [dependencies]
-smithay = { workspace = true }
+# emez needs smithay's `xwayland` feature for its embedded X11Wm + XWayland
+# (the `ox_*` test scenarios rely on a collaborating XWayland peer inside the
+# host compositor). emskin itself no longer pulls this feature — its X
+# support is delegated to the external `xwayland-satellite` process — so we
+# opt in per-crate rather than workspace-wide.
+#
+# Feature-unification interaction: cargo unifies features within each build's
+# dep graph, not across the whole workspace. Since emskin never depends on
+# emez (tests invoke it via spawned subprocess, not as a Rust dep), running
+# `cargo build -p emskin` still gets smithay without xwayland. `cargo build`
+# at the workspace level builds both; emskin compiles cleanly in either
+# configuration because the `WindowSurface::X11` arm and `x11_surface()`
+# method are gated on the feature inside smithay and we simply don't touch
+# them in emskin anymore.
+#
+# Future refactor: emez could switch to upstream smithay (crates.io) instead
+# of the emskin-patches fork to eliminate even the theoretical coupling —
+# emez only relies on one patch from the fork (`X11Wm::new_selection`
+# flushing the x11rb connection after `set_selection_owner`, see
+# `crates/emez/CLAUDE.md` → Gotchas). If that patch lands upstream, emez's
+# `smithay` dependency can become a plain registry entry, fully
+# decoupling from emskin's fork. Not a blocker today.
+smithay = { workspace = true, features = ["xwayland"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
