@@ -71,6 +71,14 @@ cargo build -p emez
 cargo test -p emskin
 ```
 
+**Two-step, not one**: emez is a binary crate and cargo stable has
+no bindeps (`-Z bindeps` is nightly), so there's no first-class way
+to declare "build this binary before my tests". The harness
+discovers the emez binary at runtime via `find_emez_binary()`
+scanning `target/{debug,release}/emez`; if it's not there, the first
+test that needs it panics with a clear error. Run the two commands
+in order or wrap them in a shell alias.
+
 Tests run in parallel: the harness pre-allocates unique X DISPLAY
 numbers per test (from a process-wide reservation pool) and passes
 them to both emez and emskin via `--xwayland-display`, so smithay's

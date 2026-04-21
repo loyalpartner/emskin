@@ -136,7 +136,11 @@ impl XwlsIntegration {
                             tracing::warn!("xwls on_socket_connect failed: {e}");
                         }
                     }
-                    Ok(PostAction::Continue)
+                    // Matches niri: remove self on first fire. The sibling
+                    // abstract source is removed explicitly inside
+                    // on_socket_connect via handle.remove(token), so both
+                    // get cleaned up regardless of which fires first.
+                    Ok(PostAction::Remove)
                 },
             )
             .map_err(|e| std::io::Error::other(format!("calloop insert unix source: {e}")))?;
@@ -152,7 +156,7 @@ impl XwlsIntegration {
                                 tracing::warn!("xwls on_socket_connect failed: {e}");
                             }
                         }
-                        Ok(PostAction::Continue)
+                        Ok(PostAction::Remove)
                     },
                 )
                 .map_err(|e| {
@@ -187,6 +191,11 @@ impl XwlsIntegration {
         &mut self,
         handle: &LoopHandle<'static, D>,
     ) -> std::io::Result<()> {
+        tracing::info!(
+            display = %self.sockets.display_name,
+            "xwayland-satellite: X client connected, spawning satellite"
+        );
+
         // Remove both watch sources — satellite takes over the fds once
         // it's spawned. Does nothing if we're already Running (callbacks
         // could in theory race; idempotent guard here).
@@ -210,6 +219,34 @@ impl XwlsIntegration {
         // Spawn the satellite in a dedicated thread. The thread owns
         // cloned fds; the parent's X11Sockets stays intact so rearming
         // later can re-register sources.
+        if let Err(e) = self.spawn_satellite_thread() {
+            // Spawner setup failed after sources were removed. Loud error
+            // and attempt to restore the Watching state so the next X
+            // client connect gets another chance. If re-arm itself fails
+            // (calloop source insert failed — truly terminal), state
+            // stays Disarmed and XWayland integration is effectively
+            // disabled for this run.
+            tracing::error!(
+                display = %self.sockets.display_name,
+                "xwayland-satellite: spawner setup failed: {e}; attempting re-arm"
+            );
+            if let Err(rearm_err) = self.arm(handle) {
+                tracing::error!(
+                    display = %self.sockets.display_name,
+                    "xwayland-satellite: re-arm after spawner failure also failed: \
+                     {rearm_err} — XWayland integration disabled until emskin restart"
+                );
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Helper: clone fds, build SpawnConfig hands-off, and start the
+    /// spawner thread. On success transitions self into `Running`.
+    /// Factored out of `on_socket_connect` so failures can be handled
+    /// without deeply nested `?` across the source-removal boundary.
+    fn spawn_satellite_thread(&mut self) -> std::io::Result<()> {
         let unix_clone = self.sockets.unix_fd.try_clone()?;
         let abstract_clone = self
             .sockets
@@ -266,10 +303,22 @@ fn spawn_and_wait(
     let unix_raw = unix_fd.as_raw_fd();
     let abstract_raw = abstract_fd.as_ref().map(|fd| fd.as_raw_fd());
 
+    tracing::info!(
+        display = %display_name,
+        binary = %spawn_cfg.binary.display(),
+        "xwayland-satellite: spawner thread executing {}",
+        spawn_cfg.binary.display()
+    );
     let mut cmd = build_spawn_command_raw(&spawn_cfg, &display_name, unix_raw, abstract_raw);
 
     let wait_result = match cmd.spawn() {
         Ok(mut child) => {
+            let pid = child.id();
+            tracing::info!(
+                display = %display_name,
+                pid,
+                "xwayland-satellite: child spawned"
+            );
             // After spawn, the child has inherited the fds; the cloned
             // OwnedFds in this thread can be dropped.
             drop(unix_fd);
@@ -282,7 +331,15 @@ fn spawn_and_wait(
         }
     };
     if let Some(status) = wait_result {
-        tracing::info!("xwayland-satellite exited with {status}");
+        tracing::info!(
+            display = %display_name,
+            "xwayland-satellite exited with {status}; requesting rearm"
+        );
+    } else {
+        tracing::warn!(
+            display = %display_name,
+            "xwayland-satellite: spawner exiting without a child status; requesting rearm"
+        );
     }
 
     if let Some(tx) = done_hook {
