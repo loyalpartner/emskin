@@ -29,6 +29,12 @@ Plus the test clients themselves: `wl-clipboard`, `xclip`, `ffmpeg`. On Arch:
 sudo pacman -S xorg-server-xvfb wl-clipboard xclip ffmpeg
 ```
 
+`xwayland-satellite` is **not** required to run the test suite —
+emskin's satellite supervisor probes the binary at startup and falls
+back to "Wayland-only" if missing, and the E2E clipboard tests don't
+drive any internal-X client. Install it (AUR on Arch) only when you
+want to exercise emskin end-to-end against real X applications.
+
 ## Local checks
 
 Match CI before pushing:
@@ -52,10 +58,11 @@ cargo test -p emskin
 ```
 
 Tests run in parallel. The harness pre-allocates a unique X DISPLAY
-number per test (both for emez's XWayland and for emskin's own) from
-a process-wide reservation pool, passes them through
-`--xwayland-display`, and isolates every test's
-`XDG_RUNTIME_DIR`/Wayland socket, so concurrent spawns don't race.
+number per test (both for emez's embedded XWayland and for emskin's
+own `xwayland-satellite` supervisor) from a process-wide reservation
+pool, passes them through `--xwayland-display`, and isolates every
+test's `XDG_RUNTIME_DIR`/Wayland socket, so concurrent spawns don't
+race.
 
 ## Commits & PRs
 

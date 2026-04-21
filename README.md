@@ -38,9 +38,12 @@ Same IPC layer (compositor ↔ Elisp) that powers embedding today; each future i
 Hosts we've actually tested emskin under. The columns indicate which
 kind of desktop session you launched emskin from, **not** which kinds
 of clients it can embed — emskin always embeds both Wayland and X11
-clients (the latter via XWayland), regardless of host. `n/a` just
+clients (X11 via the external [`xwayland-satellite`] process, spawned
+on demand when an X client connects), regardless of host. `n/a` just
 means that compositor or window manager doesn't have a session of
 that type to nest into.
+
+[`xwayland-satellite`]: https://github.com/Supreeeme/xwayland-satellite
 
 | Host    | Wayland session | X11 session |
 |---------|-----------------|-------------|
@@ -51,7 +54,7 @@ that type to nest into.
 | niri    | ✓               | n/a         |
 | i3wm    | n/a             | ✓           |
 
-pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works via XWayland.
+pgtk Emacs (`--with-pgtk`) is recommended. GTK3 X11 Emacs also works when `xwayland-satellite` is installed (it's spawned lazily the moment an X client first connects).
 
 ## Install
 
@@ -72,6 +75,11 @@ yay -S emskin-bin
 ```bash
 # Dependencies (Arch Linux)
 sudo pacman -S wayland libxkbcommon mesa
+
+# Optional: embed X11 applications via xwayland-satellite (AUR).
+# Without it emskin runs Wayland-only — X clients can't be embedded
+# but everything else (pgtk Emacs, Wayland apps, clipboard, IME) works.
+yay -S xwayland-satellite
 
 # Option 1: cargo install
 cargo install --git https://github.com/emskin/emskin.git

@@ -482,7 +482,7 @@ Wayland client   Compositor       Xwm         XWayland X server      X client
   <https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/master/xwayland/selection/>
 - **sway xwayland selection**
   <https://github.com/swaywm/sway/blob/master/sway/desktop/xwayland.c>
-- **smithay `X11Wm` selection 钩子**（`XwmHandler::{new_selection, send_selection, cleared_selection}`）
+- **smithay `X11Wm` selection 钩子**（`XwmHandler::{new_selection, send_selection, cleared_selection}`） — 一份协议参考，emskin 自身已不再使用该路径，X ↔ Wayland 翻译现在由外部 [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) 进程承担（见 `docs/clipboard-flows.md` §4）。
   <https://docs.rs/smithay/latest/smithay/xwayland/xwm/trait.XwmHandler.html>
 
 ### 实用工具（读协议时拿来对照行为）
