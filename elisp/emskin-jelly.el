@@ -23,12 +23,15 @@ window at the same pixel coords still fires a new animation.")
 ;; ---------------------------------------------------------------------------
 
 (defun emskin--jelly-window-origin (window)
-  "Return (X Y) of WINDOW's top-left in Emacs surface coordinates.
-Adds the GTK external menu/tool-bar offset so the result matches what
-the compositor sees as the Emacs surface origin."
-  (let ((edges (window-pixel-edges window)))
-    (list (nth 0 edges)
-          (+ (nth 1 edges) (emskin--frame-header-offset (window-frame window))))))
+  "Return (X Y) of WINDOW's top-left in Emacs surface coordinates."
+  (let* ((frame (window-frame window))
+         (edges (window-pixel-edges window))
+         (header (emskin--frame-header-offset frame))
+         ;; Child frame offset relative to the root (parent) frame surface.
+         (frame-x (or (frame-parameter frame 'left) 0))
+         (frame-y (or (frame-parameter frame 'top) 0)))
+    (list (+ (nth 0 edges) frame-x)
+          (+ (nth 1 edges) header frame-y))))
 
 (defun emskin--jelly-cursor-rect ()
   "Return (X Y W H COLOR) of the text caret in surface pixels, or nil."
