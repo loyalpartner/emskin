@@ -267,6 +267,14 @@ emskin is built on [Smithay](https://github.com/Smithay/smithay) — the
 Rust Wayland compositor library that does most of the heavy protocol
 work.
 
+The on-demand XWayland path (`crates/emskin/src/xwayland_satellite/`) is
+ported from [niri](https://github.com/YaLTeR/niri) (`src/utils/xwayland/`,
+GPL-3.0-or-later) — attribution and original license preserved in each
+file header. The external X server process itself is
+[xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite)
+by Shawn Wallace — it shoulders the whole X ↔ Wayland protocol
+translation so emskin never has to speak X.
+
 ## License
 
 GPL-3.0

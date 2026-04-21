@@ -257,6 +257,13 @@ emskin 最初是为 [Emacs Application Framework (EAF)](https://github.com/emacs
 emskin 构建于 [Smithay](https://github.com/Smithay/smithay) 之上——
 这是 Rust 实现的 Wayland 合成器库，承担了大部分协议层的繁重工作。
 
+XWayland 按需启动的整套机制（`crates/emskin/src/xwayland_satellite/`）
+移植自 [niri](https://github.com/YaLTeR/niri) 的 `src/utils/xwayland/`
+（GPL-3.0-or-later）——每个文件头部都保留了原作者署名和 license。
+承担实际 X ↔ Wayland 协议翻译的外部进程是 Shawn Wallace 的
+[xwayland-satellite](https://github.com/Supreeeme/xwayland-satellite)；
+把整个 X 世界装进它里面，emskin 自己就不用再懂 X 协议了。
+
 ## License
 
 GPL-3.0
