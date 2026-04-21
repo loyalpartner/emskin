@@ -150,8 +150,11 @@ fn process_pending_toplevels(state: &mut EmskinState) {
                 surface.send_pending_configure();
 
                 // Map window at bar offset in the new workspace's space.
+                // Emacs sits at the bottom of the stack so future app
+                // toplevels migrate above it naturally.
                 if let Some(ws) = state.inactive_workspaces.get_mut(&ws_id) {
-                    ws.space.map_element(window, geo.loc, false);
+                    ws.space.map_element(window.clone(), geo.loc, false);
+                    ws.space.lower_element(&window);
                 }
             }
 

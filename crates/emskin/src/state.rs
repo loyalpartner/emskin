@@ -965,7 +965,13 @@ pub fn resize_emacs_in_space(
             });
             toplevel.send_pending_configure();
         }
-        space.map_element(window, geo.loc, false);
+        space.map_element(window.clone(), geo.loc, false);
+        // smithay's `map_element` removes + re-appends, pushing Emacs to
+        // the top of the stack every time. Since Emacs is fullscreen host,
+        // that would cover every embedded app (visible as a white screen
+        // on rapid host resize). Keep Emacs at the bottom so apps stay on
+        // top without per-app raise.
+        space.lower_element(&window);
     }
 }
 

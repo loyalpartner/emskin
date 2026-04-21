@@ -51,6 +51,10 @@ impl XdgShellHandler for EmskinState {
 
             let window = Window::new_wayland_window(surface);
             self.space.map_element(window.clone(), (0, 0), false);
+            // Emacs is the fullscreen host and must stay at the bottom of
+            // the stack so later app toplevels (and any remap via
+            // resize_emacs_in_space) never cover them.
+            self.space.lower_element(&window);
 
             // Give Emacs initial keyboard focus.
             let serial = SERIAL_COUNTER.next_serial();
@@ -80,6 +84,10 @@ impl XdgShellHandler for EmskinState {
             }
             let window = Window::new_wayland_window(surface.clone());
             self.space.map_element(window.clone(), (0, 0), false);
+            // Keep Emacs at the bottom while it sits briefly in the active
+            // space before `process_pending_toplevels` decides whether to
+            // move it into a new workspace.
+            self.space.lower_element(&window);
             self.pending_emacs_toplevels.push((surface, window));
             tracing::info!("Emacs client toplevel detected — deferred for parent check");
         } else {
