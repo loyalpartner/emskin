@@ -50,44 +50,32 @@ pub struct SurfaceLayer {
 }
 
 impl AppWindow {
-    /// Get the primary WlSurface (Wayland toplevel or X11).
+    /// Get the primary WlSurface. X clients reach us through
+    /// xwayland-satellite as ordinary Wayland toplevels, so a single
+    /// lookup suffices.
     pub fn wl_surface(&self) -> Option<WlSurface> {
-        self.window
-            .toplevel()
-            .map(|t| t.wl_surface().clone())
-            .or_else(|| self.window.x11_surface().and_then(|x| x.wl_surface()))
+        self.window.toplevel().map(|t| t.wl_surface().clone())
     }
 
     /// Collect the full surface stack: toplevel (offset=0,0) + all popups (recursive).
-    /// For Wayland windows this includes xdg popups; for X11 windows just the surface.
     pub fn surface_layers(&self) -> Vec<SurfaceLayer> {
-        if let Some(toplevel) = self.window.toplevel() {
-            let wl = toplevel.wl_surface();
-            let wg = self.window.geometry().loc;
-            let mut layers = vec![SurfaceLayer {
-                surface: wl.clone(),
-                render_offset: (-wg.x, -wg.y).into(),
-            }];
-            for (popup, offset) in PopupManager::popups_for_surface(wl) {
-                let pg = popup.geometry().loc;
-                layers.push(SurfaceLayer {
-                    surface: popup.wl_surface().clone(),
-                    render_offset: (offset.x - pg.x, offset.y - pg.y).into(),
-                });
-            }
-            layers
-        } else if let Some(x11) = self.window.x11_surface() {
-            x11.wl_surface()
-                .map(|s| {
-                    vec![SurfaceLayer {
-                        surface: s,
-                        render_offset: (0, 0).into(),
-                    }]
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        let Some(toplevel) = self.window.toplevel() else {
+            return Vec::new();
+        };
+        let wl = toplevel.wl_surface();
+        let wg = self.window.geometry().loc;
+        let mut layers = vec![SurfaceLayer {
+            surface: wl.clone(),
+            render_offset: (-wg.x, -wg.y).into(),
+        }];
+        for (popup, offset) in PopupManager::popups_for_surface(wl) {
+            let pg = popup.geometry().loc;
+            layers.push(SurfaceLayer {
+                surface: popup.wl_surface().clone(),
+                render_offset: (offset.x - pg.x, offset.y - pg.y).into(),
+            });
         }
+        layers
     }
 }
 
