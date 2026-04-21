@@ -190,14 +190,23 @@ impl WaylandHost {
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
             )
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Inherit stderr (rather than `Stdio::null`) so panics that
+            // happen before tracing init (missing libs, xkb data, …) end
+            // up in the test stderr / CI log instead of disappearing.
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("failed to spawn emez — build with `cargo build -p emez`");
 
         // Wait for the wayland socket to bind.
         let sock_path = xdg.join(&wayland_socket_name);
-        wait_for_path(&sock_path, Duration::from_secs(10))
-            .unwrap_or_else(|| panic!("emez wayland socket never appeared"));
+        wait_for_path(&sock_path, Duration::from_secs(10)).unwrap_or_else(|| {
+            let log_tail = std::fs::read_to_string(&log_file).unwrap_or_default();
+            panic!(
+                "emez wayland socket never appeared (XDG_RUNTIME_DIR={}, log_file={}):\n{log_tail}",
+                xdg.display(),
+                log_file.display()
+            )
+        });
 
         // Wait for XWayland to report Ready via the ready file. XWayland
         // startup is ~100-300ms; give it a generous budget.
@@ -558,7 +567,10 @@ impl Compositor {
             .env("EMSKIN_DISABLE_EMACS_DETECTION", "1")
             .args(extra_args)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // Inherit stderr (same reason as emez — panics from
+            // render_frame / EGL on slow CI runners are otherwise
+            // silently dropped).
+            .stderr(Stdio::inherit());
         for (k, v) in extra_env {
             cmd.env(k, v);
         }
@@ -620,8 +632,18 @@ impl Compositor {
 
     pub fn connect_ipc(&self) -> UnixStream {
         let stream = UnixStream::connect(&self.ipc_socket).expect("connect ipc");
+        // 30s, not 5s: `wait_for_ipc_socket` only waits for the listening
+        // socket *file* to exist, which `IpcServer::bind` creates very early
+        // in main.rs — well before `event_loop.run` starts driving `accept`.
+        // On a slow CI runner (GitHub Actions software-mesa with DRI2
+        // BAD_ALLOC retries, dmabuf probing, clipboard backend handshakes)
+        // emskin can take 6–8s between socket bind and the first `accept`
+        // tick, during which a connected client gets `EAGAIN` on the first
+        // read and the test panics at `read_exact("read header")`. Local
+        // hardware never sees this because emskin reaches the event loop in
+        // sub-second time, masking the race.
         stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
+            .set_read_timeout(Some(Duration::from_secs(30)))
             .expect("set read timeout");
         stream
     }
