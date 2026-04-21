@@ -14,54 +14,66 @@ jobs:
   e2e:
     name: Nested-host E2E
     runs-on: ubuntu-latest
+    # Run inside Arch so we can install xwayland-satellite from the
+    # official repo (it is not on crates.io and not packaged by Ubuntu).
+    # base-devel pulls in gcc + pkgconf + make required by Rust crates'
+    # build.rs scripts (smithay, wayland-sys, x11rb-protocol, …).
+    container:
+      image: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libudev-dev \
-            libinput-dev \
-            libgbm-dev \
-            libseat-dev \
-            libpixman-1-dev \
-            libssl-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxcb-composite0-dev \
-            libxcb-xfixes0-dev \
-            libxcb-xinput-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-dri3-dev \
-            libxcb-present-dev \
-            libxcb-sync-dev \
-            libxcb-randr0-dev \
-            libxcb-shm0-dev \
-            libxcb-xkb-dev \
-            libxcb-dpms0-dev \
-            libxcb-res0-dev \
-            libxcb-cursor-dev \
-            libxcb-icccm4-dev \
-            libxkbcommon-x11-dev \
-            libfontconfig1-dev \
-            libfreetype-dev \
-            libegl1 \
-            libgles2 \
-            xvfb \
-            xwayland \
-            x11-utils \
-            xauth \
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            git \
+            rustup \
+            wayland \
+            libxkbcommon \
+            libxkbcommon-x11 \
+            xkeyboard-config \
+            libinput \
+            mesa \
+            libglvnd \
+            seatd \
+            pixman \
+            openssl \
+            libxcb \
+            xcb-util-cursor \
+            xcb-util-wm \
+            fontconfig \
+            ttf-dejavu \
+            freetype2 \
+            xorg-server-xvfb \
+            xorg-xwayland \
+            xorg-xkbcomp \
+            xorg-xdpyinfo \
+            xorg-xauth \
             wl-clipboard \
             xclip \
-            ffmpeg
+            ffmpeg \
+            xwayland-satellite
+
+      # Arch container is bare — no display manager / systemd has ever
+      # created /tmp/.X11-unix, so smithay's `pre_bind_unix_socket` for
+      # XWayland fails with ENOENT before tracing even initialises. The
+      # 1777 sticky bit matches what xorg-server's tmpfiles.d ships.
+      - name: Create /tmp/.X11-unix
+        run: |
+          mkdir -p /tmp/.X11-unix
+          chmod 1777 /tmp/.X11-unix
+
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain (from crates/emskin/rust-toolchain.toml)
-        working-directory: crates/emskin
-        run: rustup show
+        run: |
+          # `rustup show` inside the crate respects the toml override and
+          # downloads 1.92.0, but rustup itself has no default toolchain
+          # set on a fresh Arch install — subsequent `cargo` invocations
+          # from the workspace root would fail with "rustup could not
+          # choose a version of cargo to run". Pin the same channel
+          # globally to keep workspace-root commands working.
+          (cd crates/emskin && rustup show)
+          rustup default 1.92.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
