@@ -13,6 +13,7 @@ pub mod state;
 pub mod tick;
 pub mod utils;
 pub mod winit;
+pub mod xwayland_satellite;
 
 pub use focus::KeyboardFocusTarget;
 pub use state::EmskinState;
