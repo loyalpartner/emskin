@@ -7,32 +7,36 @@
 //!
 //! emez also embeds its own XWayland (see `crates/emez/src/xwayland.rs`),
 //! exposing a host-side X DISPLAY. This lets us exercise the
-//! wayland-host ↔ outside-X combinations in the same host environment
-//! (the `ox_*` / `*_ox` tests below) alongside the pure-wayland ones.
+//! wayland-host ↔ outside-X combinations alongside the pure-wayland ones.
 //!
 //! Roles:
 //! - `iw` — inside emskin's wayland data_device (wl-copy on emskin)
-//! - `ix` — inside emskin's XWayland (xclip on emskin's DISPLAY)
 //! - `ow` — outside on host emez (wl-copy on emez's socket)
 //! - `ox` — outside on host emez's embedded XWayland (xclip on host DISPLAY)
+//!
+//! There is no `ix` role: under `xwayland-satellite` every X client is
+//! translated into a Wayland client before it reaches emskin, so from
+//! the compositor's point of view there is simply no such thing as an
+//! "internal X" peer. The X-side translation logic is satellite's
+//! concern and has its own test suite upstream.
+//!
+//! Tests here therefore do not cover the X → Wayland propagation
+//! performed by satellite — they only verify the wayland data paths on
+//! emskin.
 
 mod common;
-use common::{
-    recv_one, wl_copy, wl_paste, wl_paste_primary, xclip_copy, xclip_copy_primary, xclip_paste,
-    Compositor, NestedHost,
-};
+use common::{recv_one, wl_copy, wl_paste, xclip_copy, xclip_paste, Compositor, NestedHost};
 
 use std::time::Duration;
 
 /// Allow the selection/daemon dance to settle. wl-copy forks a daemon
 /// and needs to send `wl_data_source.offer` before readers can see
-/// anything; X ↔ wayland propagation via data_control adds a few
+/// anything; host ↔ emskin propagation via data_control adds a few
 /// round-trips too. 300ms is empirically ample.
 const DAEMON_SETTLE: Duration = Duration::from_millis(300);
 
 struct Setup {
     compositor: Compositor,
-    emskin_xwayland_display: String,
     // Keep the IPC stream alive for the lifetime of the test.
     // emskin gates `set_host_selection` on `ipc.is_connected()` to avoid
     // clobbering host clipboard before a real Emacs connects; dropping
@@ -49,11 +53,13 @@ fn setup() -> Setup {
         connected.contains(r#""type":"connected""#),
         "handshake failed: {connected}"
     );
-    let d = compositor.cache_xwayland_display(&mut stream);
+    // Wait for satellite's X socket to be pre-bound + XWaylandReady IPC.
+    // Even though no test here spawns an X client, this is the cleanest
+    // signal that emskin has finished the full startup path.
+    let _ = compositor.cache_xwayland_display(&mut stream);
     compositor.wait_for_emskin_wayland_socket(Duration::from_secs(5));
     Setup {
         compositor,
-        emskin_xwayland_display: format!(":{d}"),
         _ipc: stream,
     }
 }
@@ -80,21 +86,6 @@ fn iw_to_iw() {
 }
 
 #[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn iw_to_ix() {
-    let s = setup();
-    let text = "iw-to-ix";
-    wl_copy(
-        s.compositor.xdg_runtime_dir(),
-        s.compositor.emskin_wayland(),
-        text,
-    );
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(&s.emskin_xwayland_display);
-    assert_eq!(got, text);
-}
-
-#[test]
 fn iw_to_ow() {
     let s = setup();
     let text = "iw-to-ow";
@@ -112,53 +103,17 @@ fn iw_to_ow() {
     assert_eq!(got, text);
 }
 
-// =============================================================================
-// ix_* : emskin's XWayland as source
-// =============================================================================
-
 #[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_to_iw() {
+fn iw_to_ox() {
     let s = setup();
-    let text = "ix-to-iw";
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = wl_paste(
+    let text = "iw-to-ox";
+    wl_copy(
         s.compositor.xdg_runtime_dir(),
         s.compositor.emskin_wayland(),
+        text,
     );
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_to_ix() {
-    let s = setup();
-    let text = "ix-to-ix";
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, text);
     std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(&s.emskin_xwayland_display);
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_to_ow() {
-    let s = setup();
-    let text = "ix-to-ow";
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let host_wl = s
-        .compositor
-        .host_wayland()
-        .expect("wayland host has wl socket");
-    let got = wl_paste(s.compositor.xdg_runtime_dir(), host_wl);
-    let _ = xclip.kill();
-    let _ = xclip.wait();
+    let got = xclip_paste(s.compositor.host_display());
     assert_eq!(got, text);
 }
 
@@ -183,55 +138,9 @@ fn ow_to_iw() {
     assert_eq!(got, text);
 }
 
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ow_to_ix() {
-    let s = setup();
-    let text = "ow-to-ix";
-    let host_wl = s
-        .compositor
-        .host_wayland()
-        .expect("wayland host has wl socket");
-    wl_copy(s.compositor.xdg_runtime_dir(), host_wl, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(&s.emskin_xwayland_display);
-    assert_eq!(got, text);
-}
-
 // =============================================================================
-// ox_* / *_ox : outside X client on host emez's embedded XWayland
+// ox_* : outside X client on host emez's embedded XWayland
 // =============================================================================
-//
-// These exercise the ClipboardProxy wayland data-control path in both
-// directions under a Wayland host, complementing the X11-host variants
-// in `e2e_clipboard_x11.rs` (which hit the X11 fallback code instead).
-
-#[test]
-fn iw_to_ox() {
-    let s = setup();
-    let text = "iw-to-ox";
-    wl_copy(
-        s.compositor.xdg_runtime_dir(),
-        s.compositor.emskin_wayland(),
-        text,
-    );
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(s.compositor.host_display());
-    assert_eq!(got, text);
-}
-
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_to_ox() {
-    let s = setup();
-    let text = "ix-to-ox";
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(s.compositor.host_display());
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
 
 #[test]
 fn ox_to_iw() {
@@ -240,93 +149,6 @@ fn ox_to_iw() {
     let mut xclip = xclip_copy(s.compositor.host_display(), text);
     std::thread::sleep(DAEMON_SETTLE);
     let got = wl_paste(
-        s.compositor.xdg_runtime_dir(),
-        s.compositor.emskin_wayland(),
-    );
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ox_to_ix() {
-    let s = setup();
-    let text = "ox-to-ix";
-    let mut xclip = xclip_copy(s.compositor.host_display(), text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(&s.emskin_xwayland_display);
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
-// =============================================================================
-// Stale-selection regression
-// =============================================================================
-
-/// Regression: inside XWayland owns the selection first, then an outside
-/// wayland client takes a new selection on the host. A subsequent paste
-/// inside XWayland must return the **new host** content, not the stale
-/// inside-XWayland content. The bug this guards against: when the
-/// xclip-`-i` daemon is still holding the inside X CLIPBOARD, emskin's
-/// `inject_host_selection` must call `X11Wm::new_selection` to take
-/// ownership away from that daemon so subsequent X paste requests are
-/// routed to the host selection source instead of the stale daemon.
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_then_ow_paste_ix_sees_ow() {
-    let s = setup();
-    let ix_text = "stale-ix";
-    let ow_text = "fresh-ow";
-
-    // Step 1: inside XWayland copies first. xclip -i forks a daemon that
-    // stays alive holding the X CLIPBOARD — do not kill it before step 3,
-    // otherwise the bug scenario disappears.
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, ix_text);
-    std::thread::sleep(DAEMON_SETTLE);
-
-    // Sanity: the inside X selection is indeed ix_text before step 2.
-    let before = xclip_paste(&s.emskin_xwayland_display);
-    assert_eq!(before, ix_text, "setup precondition failed");
-
-    // Step 2: outside Wayland client takes a new selection on the host.
-    // emskin's ClipboardProxy should observe this via data-control and
-    // replace the inside selection (both wl_data_device and X CLIPBOARD).
-    let host_wl = s
-        .compositor
-        .host_wayland()
-        .expect("wayland host has wl socket");
-    wl_copy(s.compositor.xdg_runtime_dir(), host_wl, ow_text);
-    std::thread::sleep(DAEMON_SETTLE);
-
-    // Step 3: inside XWayland paste. Must see the fresh host content,
-    // not the stale ix xclip daemon's content.
-    let got = xclip_paste(&s.emskin_xwayland_display);
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(
-        got, ow_text,
-        "inside XWayland paste returned stale {ix_text:?} instead of fresh {ow_text:?}"
-    );
-}
-
-// =============================================================================
-// PRIMARY (middle-click) sanity
-// =============================================================================
-
-/// Exercises the `set_primary_selection` /
-/// `request_primary_client_selection` path once. If the dedicated PRIMARY
-/// smithay helpers have a bug, this test will catch it while the
-/// CLIPBOARD matrix stays green.
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn primary_ix_to_iw() {
-    let s = setup();
-    let text = "primary-ix-to-iw";
-    let mut xclip = xclip_copy_primary(&s.emskin_xwayland_display, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = wl_paste_primary(
         s.compositor.xdg_runtime_dir(),
         s.compositor.emskin_wayland(),
     );

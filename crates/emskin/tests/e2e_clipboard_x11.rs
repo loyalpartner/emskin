@@ -1,15 +1,18 @@
 //! Clipboard E2E tests with an **X11 host** (bare Xvfb, no host wayland).
 //!
-//! Covers the cross-boundary combinations involving a host-side X11
-//! client (emskin's `ClipboardProxy` fallback connects to the host
-//! Xvfb directly). Intentionally skips `里 W ↔ 里 X` because those go
-//! through emskin's anvil-pattern internal bridge regardless of host,
-//! and `e2e_clipboard_wayland.rs` already covers them.
+//! Covers the cross-boundary combinations where the **host** is X11
+//! (emskin's `ClipboardProxy` fallback connects to the host Xvfb
+//! directly) and the emskin-internal client is a Wayland client.
+//!
+//! Under xwayland-satellite emskin has no "internal X" role: every X
+//! client is translated into a Wayland client before it reaches us.
+//! So the matrix here is intentionally narrow — it exercises only the
+//! paths where emskin sees Wayland on one side and the host Xvfb on
+//! the other.
 //!
 //! Roles:
 //! - `iw` — inside emskin's wayland data_device
-//! - `ix` — inside emskin's XWayland
-//! - `ox` — outside on host Xvfb (no `ow` — host has no wayland)
+//! - `ox` — outside on host Xvfb
 
 mod common;
 use common::{
@@ -23,7 +26,6 @@ const DAEMON_SETTLE: Duration = Duration::from_millis(300);
 
 struct Setup {
     compositor: Compositor,
-    emskin_xwayland_display: String,
     _ipc: std::os::unix::net::UnixStream,
 }
 
@@ -35,17 +37,16 @@ fn setup() -> Setup {
         connected.contains(r#""type":"connected""#),
         "handshake failed: {connected}"
     );
-    let d = compositor.cache_xwayland_display(&mut stream);
+    let _ = compositor.cache_xwayland_display(&mut stream);
     compositor.wait_for_emskin_wayland_socket(Duration::from_secs(5));
     Setup {
         compositor,
-        emskin_xwayland_display: format!(":{d}"),
         _ipc: stream,
     }
 }
 
 // =============================================================================
-// emskin sources → host X sink
+// emskin-internal wayland → host X sink
 // =============================================================================
 
 #[test]
@@ -62,21 +63,8 @@ fn iw_to_ox() {
     assert_eq!(got, text);
 }
 
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ix_to_ox() {
-    let s = setup();
-    let text = "x11host-ix-to-ox";
-    let mut xclip = xclip_copy(&s.emskin_xwayland_display, text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(s.compositor.host_display());
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
 // =============================================================================
-// host X source → emskin sinks
+// host X source → emskin-internal wayland sink
 // =============================================================================
 
 #[test]
@@ -89,19 +77,6 @@ fn ox_to_iw() {
         s.compositor.xdg_runtime_dir(),
         s.compositor.emskin_wayland(),
     );
-    let _ = xclip.kill();
-    let _ = xclip.wait();
-    assert_eq!(got, text);
-}
-
-#[test]
-#[ignore = "satellite clipboard X<->W bridging needs re-validation - follow-up"]
-fn ox_to_ix() {
-    let s = setup();
-    let text = "x11host-ox-to-ix";
-    let mut xclip = xclip_copy(s.compositor.host_display(), text);
-    std::thread::sleep(DAEMON_SETTLE);
-    let got = xclip_paste(&s.emskin_xwayland_display);
     let _ = xclip.kill();
     let _ = xclip.wait();
     assert_eq!(got, text);
