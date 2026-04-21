@@ -23,7 +23,6 @@ smithay = { git = "https://github.com/emskin/smithay.git", branch = "emskin-patc
     "backend_drm",
     "wayland_frontend",
     "desktop",
-    "xwayland",
 ] }
 cosmic-text = "0.18"
 serde = { version = "1", features = ["derive"] }

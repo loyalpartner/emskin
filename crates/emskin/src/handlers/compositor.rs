@@ -28,9 +28,6 @@ impl CompositorHandler for EmskinState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        if let Some(state) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
-            return &state.compositor_state;
-        }
         &client
             .get_data::<ClientState>()
             .expect("ClientState missing — client was not inserted via our listener")

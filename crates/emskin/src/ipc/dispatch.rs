@@ -150,44 +150,38 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, rect: crate::ipc::I
         return;
     };
 
-    if let Some(toplevel) = app.window.toplevel() {
-        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-        toplevel.with_pending_state(|s| {
-            s.size = Some((w, h).into());
-            s.states.set(xdg_toplevel::State::TiledLeft);
-            s.states.set(xdg_toplevel::State::TiledRight);
-            s.states.set(xdg_toplevel::State::TiledTop);
-            s.states.set(xdg_toplevel::State::TiledBottom);
-        });
-        toplevel.send_pending_configure();
+    let Some(toplevel) = app.window.toplevel() else {
+        return;
+    };
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
+    toplevel.with_pending_state(|s| {
+        s.size = Some((w, h).into());
+        s.states.set(xdg_toplevel::State::TiledLeft);
+        s.states.set(xdg_toplevel::State::TiledRight);
+        s.states.set(xdg_toplevel::State::TiledTop);
+        s.states.set(xdg_toplevel::State::TiledBottom);
+    });
+    toplevel.send_pending_configure();
 
-        if app.geometry.is_none() {
-            app.geometry = Some(new_geo);
-            let window = app.window.clone();
-            state.space.map_element(window, new_geo.loc, false);
-            tracing::info!(
-                "app {window_id} mapped immediately at ({},{}) ws={}",
-                new_geo.loc.x,
-                new_geo.loc.y,
-                state.active_workspace_id
-            );
-        } else {
-            app.pending_geometry = Some(new_geo);
-            app.pending_since = Some(std::time::Instant::now());
-            tracing::debug!(
-                "app {window_id} pending geometry ({},{}) ws={}",
-                new_geo.loc.x,
-                new_geo.loc.y,
-                state.active_workspace_id
-            );
-        }
-    } else if let Some(x11) = app.window.x11_surface() {
-        if let Err(e) = x11.configure(new_geo) {
-            tracing::warn!("X11 configure failed for window_id={window_id}: {e}");
-        }
+    if app.geometry.is_none() {
         app.geometry = Some(new_geo);
         let window = app.window.clone();
         state.space.map_element(window, new_geo.loc, false);
+        tracing::info!(
+            "app {window_id} mapped immediately at ({},{}) ws={}",
+            new_geo.loc.x,
+            new_geo.loc.y,
+            state.active_workspace_id
+        );
+    } else {
+        app.pending_geometry = Some(new_geo);
+        app.pending_since = Some(std::time::Instant::now());
+        tracing::debug!(
+            "app {window_id} pending geometry ({},{}) ws={}",
+            new_geo.loc.x,
+            new_geo.loc.y,
+            state.active_workspace_id
+        );
     }
 }
 
@@ -196,10 +190,6 @@ fn ipc_close(state: &mut EmskinState, window_id: u64) {
     if let Some(app) = state.apps.get_mut(window_id) {
         if let Some(toplevel) = app.window.toplevel() {
             toplevel.send_close();
-        } else if let Some(x11) = app.window.x11_surface() {
-            if let Err(e) = x11.close() {
-                tracing::warn!("X11 close failed for window_id={window_id}: {e}");
-            }
         }
     }
 }
