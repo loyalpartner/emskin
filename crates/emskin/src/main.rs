@@ -2,6 +2,7 @@ use clap::Parser;
 use include_dir::{include_dir, Dir};
 use smithay::reexports::wayland_server::Display;
 
+use emskin::xwayland_satellite::XwaylandBackend;
 use emskin::{cursor_x11, ipc, state, EmskinState};
 use emskin_clipboard::{BackendHint, ClipboardBackend};
 
@@ -83,6 +84,20 @@ struct Cli {
     /// pre-allocate a unique number per test.
     #[arg(long)]
     xwayland_display: Option<u32>,
+
+    /// Which backend provides XWayland. `smithay` (default) embeds
+    /// smithay's `X11Wm`. `satellite` uses the external
+    /// `xwayland-satellite` process with niri-style on-demand spawn
+    /// (issue #50). The satellite path is under evaluation; switch with
+    /// care.
+    #[arg(long, value_enum, default_value_t = XwaylandBackend::Smithay)]
+    xwayland_backend: XwaylandBackend,
+
+    /// Path to the `xwayland-satellite` binary (only used with
+    /// `--xwayland-backend=satellite`). Defaults to the binary on
+    /// `$PATH`.
+    #[arg(long, default_value = "xwayland-satellite")]
+    xwayland_satellite_bin: std::path::PathBuf,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -179,7 +194,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    start_xwayland(event_loop.handle(), &mut state, cli.xwayland_display);
+    match cli.xwayland_backend {
+        XwaylandBackend::Smithay => {
+            start_xwayland(event_loop.handle(), &mut state, cli.xwayland_display);
+        }
+        XwaylandBackend::Satellite => {
+            start_xwayland_satellite(
+                event_loop.handle(),
+                &mut state,
+                cli.xwayland_display.unwrap_or(0),
+                &cli.xwayland_satellite_bin,
+            );
+        }
+    }
 
     // Launch the external workspace bar (if configured). Done after the
     // Wayland socket exists so the child inherits WAYLAND_DISPLAY via the
@@ -390,6 +417,101 @@ fn extract_embedded(src: &Dir<'_>, subdir: &str) -> Option<std::path::PathBuf> {
 fn default_ipc_path() -> std::path::PathBuf {
     let pid = std::process::id();
     std::path::PathBuf::from(format!("{}/emskin-{pid}.ipc", runtime_dir()))
+}
+
+/// niri-style xwayland-satellite integration.
+///
+/// emskin pre-binds the X11 display sockets and only spawns the external
+/// `xwayland-satellite` process when an X11 client first connects.
+/// satellite crashes are handled transparently: the spawner thread
+/// observes the exit, sends `ToMain::Rearm` through a calloop channel,
+/// and the main loop re-installs the socket watch.
+///
+/// Called only when `--xwayland-backend=satellite`. See issue #50.
+fn start_xwayland_satellite(
+    handle: smithay::reexports::calloop::LoopHandle<'static, EmskinState>,
+    state: &mut EmskinState,
+    display_start: u32,
+    binary: &std::path::Path,
+) {
+    use emskin::xwayland_satellite::{
+        setup_connection, test_ondemand, SpawnConfig, ToMain, XwlsIntegration,
+    };
+    use smithay::reexports::calloop::channel;
+
+    // Niri pattern: probe the binary first. A missing / incompatible
+    // satellite disables the XWayland integration rather than crashing
+    // the compositor.
+    if !test_ondemand(binary) {
+        tracing::warn!(
+            "xwayland-satellite at {} not available or lacks --test-listenfd-support; \
+             XWayland disabled",
+            binary.display()
+        );
+        return;
+    }
+
+    let sockets = match setup_connection(display_start) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("xwayland-satellite: failed to bind X11 sockets: {e}");
+            return;
+        }
+    };
+    let display = sockets.display;
+    let display_name = sockets.display_name.clone();
+
+    let Some(socket_name) = state.socket_name.to_str() else {
+        tracing::error!(
+            "xwayland-satellite: wayland socket name is not valid UTF-8; aborting setup"
+        );
+        return;
+    };
+    let spawn_cfg = SpawnConfig {
+        binary: binary.to_path_buf(),
+        wayland_socket: std::path::PathBuf::from(socket_name),
+        xdg_runtime_dir: std::path::PathBuf::from(runtime_dir()),
+    };
+
+    let (tx, rx) = channel::channel::<ToMain>();
+    state.xwls = Some(XwlsIntegration::new(sockets, spawn_cfg, tx));
+
+    // Rearm handler: when the spawner thread reports child exit, drain
+    // pending connections and re-install the socket watch.
+    let rearm_handle = handle.clone();
+    if let Err(e) = handle.insert_source(rx, move |event, _, st| {
+        if let channel::Event::Msg(ToMain::Rearm) = event {
+            if let Some(x) = st.xwls.as_mut() {
+                if let Err(e) = x.on_rearm(&rearm_handle) {
+                    tracing::warn!("xwayland-satellite rearm failed: {e}");
+                }
+            }
+        }
+    }) {
+        tracing::error!("xwayland-satellite: failed to install rearm channel: {e}");
+        state.xwls = None;
+        return;
+    }
+
+    if let Err(e) = state.xwls.as_mut().unwrap().arm(&handle) {
+        tracing::error!("xwayland-satellite: arm() failed: {e}");
+        state.xwls = None;
+        return;
+    }
+
+    // Socket is ready — export DISPLAY and notify Emacs. First X client
+    // connect will trigger the on-demand satellite spawn automatically.
+    std::env::set_var("DISPLAY", &display_name);
+    state.xdisplay = Some(display);
+    state
+        .ipc
+        .send(ipc::OutgoingMessage::XWaylandReady { display });
+    tracing::info!("xwayland-satellite: socket ready on {display_name}");
+
+    // Spawn pending Emacs now that both WAYLAND_DISPLAY and DISPLAY are set.
+    if let Some(pc) = state.pending_command.take() {
+        spawn_child(&pc.command, &pc.args, display, pc.standalone, state);
+    }
 }
 
 fn start_xwayland(

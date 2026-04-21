@@ -180,6 +180,11 @@ pub struct EmskinState {
     pub xwm: Option<X11Wm>,
     pub xdisplay: Option<u32>,
     pub x11_cursor_tracker: Option<crate::cursor_x11::X11CursorTracker>,
+    /// niri-style xwayland-satellite integration (used when
+    /// `--xwayland-backend=satellite`). `None` when the default smithay
+    /// X11Wm path is in use. Set at startup only; never swapped during
+    /// run.
+    pub xwls: Option<crate::xwayland_satellite::XwlsIntegration>,
 
     pub seat: Seat<Self>,
 
@@ -424,6 +429,7 @@ impl EmskinState {
             xwm: None,
             xdisplay: None,
             x11_cursor_tracker: None,
+            xwls: None,
             seat,
 
             // emskin specific
@@ -926,6 +932,12 @@ impl EmskinState {
         }
 
         None
+    }
+}
+
+impl crate::xwayland_satellite::HasXwls for EmskinState {
+    fn xwls_mut(&mut self) -> Option<&mut crate::xwayland_satellite::XwlsIntegration> {
+        self.xwls.as_mut()
     }
 }
 
