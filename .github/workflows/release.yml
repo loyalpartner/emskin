@@ -30,10 +30,8 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        working-directory: crates/emskin
+      - name: Install Rust toolchain (from rust-toolchain.toml)
         run: |
-          rustup default stable
           rustup show
           cargo install cargo-aur
 

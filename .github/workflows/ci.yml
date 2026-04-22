@@ -49,8 +49,7 @@ jobs:
             libfontconfig1-dev \
             libfreetype-dev
 
-      - name: Install Rust toolchain (from crates/emskin/rust-toolchain.toml)
-        working-directory: crates/emskin
+      - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
 
       - name: Cache cargo
