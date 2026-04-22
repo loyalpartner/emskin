@@ -1,9 +1,6 @@
-pub mod apps;
 pub mod capture;
 pub mod clipboard_bridge;
-pub mod focus;
 pub mod handlers;
-pub mod ime;
 pub mod input;
 pub mod ipc;
 pub mod mirror_render;
@@ -12,8 +9,10 @@ pub mod recording;
 pub mod state;
 pub mod tick;
 pub mod winit;
-pub mod workspace;
 pub mod xwayland_satellite;
 
-pub use focus::KeyboardFocusTarget;
-pub use state::EmskinState;
+// Re-export state sub-modules at crate root so existing
+// `crate::apps::*`, `crate::focus::*`, `crate::ime::*`,
+// `crate::workspace::*` paths keep resolving.
+pub use state::{apps, focus, ime, workspace};
+pub use state::{EmskinState, KeyboardFocusTarget};

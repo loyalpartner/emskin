@@ -1,3 +1,12 @@
+pub mod apps;
+pub mod focus;
+pub mod ime;
+pub mod workspace;
+
+// Type re-exports for common shorthands (kept for historical call sites
+// that used `crate::KeyboardFocusTarget` before state/ existed).
+pub use focus::KeyboardFocusTarget;
+
 use std::{collections::HashMap, ffi::OsString, sync::Arc};
 
 use smithay::{
