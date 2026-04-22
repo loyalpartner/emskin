@@ -463,7 +463,7 @@ emskin 自己 **不运行 X server、不实现 XwmHandler**。内部 X 应用（
 | `crates/emskin-clipboard/src/x11.rs` | `X11ClipboardProxy`（X11 宿主） |
 | `crates/emskin/src/clipboard_bridge.rs` | `HostSelectionChanged` / `HostSendRequest` / `SourceCancelled` 处理中枢 |
 | `crates/emskin/src/handlers/selection.rs` | `SelectionHandler::new_selection` / `send_selection` |
-| `crates/emskin/src/state.rs` | `SelectionState` / `SelectionOrigin`（`Wayland` / `Host`） |
+| `crates/emskin/src/state/mod.rs` | `SelectionState` / `SelectionOrigin`（`Wayland` / `Host`） |
 | `crates/emskin/src/xwayland_satellite/sockets.rs` | `X11Sockets` + `setup_connection`（X socket 预绑定） |
 | `crates/emskin/src/xwayland_satellite/spawn.rs` | `test_ondemand` 探测 + `build_spawn_command_raw`（`-listenfd` 移交） |
 | `crates/emskin/src/xwayland_satellite/watch.rs` | `XwlsIntegration` 状态机 + spawner 线程 + `ToMain::Rearm` |

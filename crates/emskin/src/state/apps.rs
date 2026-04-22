@@ -131,6 +131,15 @@ impl AppManager {
             .find(|w| w.window.wl_surface().map(|s| &*s == wl).unwrap_or(false))
     }
 
+    /// Geometry of the embedded app owning `wl`, if any. Collapses
+    /// `id_for_surface` + `get` + `.geometry` into one lookup.
+    pub fn surface_geometry(&self, wl: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+        self.windows
+            .values()
+            .find(|w| w.window.wl_surface().map(|s| &*s == wl).unwrap_or(false))
+            .and_then(|w| w.geometry)
+    }
+
     /// Collect embedded app windows whose pending geometry has timed out.
     /// Returns (window_id, window, geo) for each; caller must `map_element`.
     pub fn collect_timed_out(

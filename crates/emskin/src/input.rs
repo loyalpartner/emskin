@@ -8,7 +8,7 @@ use smithay::{
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
     reexports::wayland_server::Resource,
-    utils::{Point, SERIAL_COUNTER},
+    utils::SERIAL_COUNTER,
     wayland::{
         pointer_constraints::{with_pointer_constraint, PointerConstraint},
         seat::WaylandFocus,
@@ -44,7 +44,7 @@ impl EmskinState {
 
                         if pressed && !is_modifier_keysym(key) {
                             if let Some(label) = format_chord(modifiers, key) {
-                                state.key_cast.borrow_mut().push(label);
+                                state.effects.key_cast.borrow_mut().push(label);
                             }
                         }
 
@@ -85,10 +85,10 @@ impl EmskinState {
             InputEvent::PointerMotion { .. } => {}
 
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let Some(output) = self.space.outputs().next() else {
+                let Some(output) = self.workspace.active_space.outputs().next() else {
                     return;
                 };
-                let Some(output_geo) = self.space.output_geometry(output) else {
+                let Some(output_geo) = self.workspace.active_space.output_geometry(output) else {
                     return;
                 };
                 let Some(pointer) = self.seat.get_pointer() else {
@@ -99,10 +99,7 @@ impl EmskinState {
                 // zwp_relative_pointer_v1 — independent of
                 // `pointer.current_location()`, which freezes under a
                 // pointer lock while clients still need raw delta.
-                let delta = match self.last_pointer_raw_loc.replace(new_abs) {
-                    Some(prev) => new_abs - prev,
-                    None => Point::default(),
-                };
+                let delta = self.cursor.consume_raw_location(new_abs);
                 let time_msec = event.time_msec();
                 let new_under = self.surface_under(new_abs);
 
@@ -260,16 +257,16 @@ impl EmskinState {
                     // Scope the borrow so subsequent pointer-focus code can
                     // still reborrow `self`.
                     let skeleton_hit = {
-                        let mut sk = self.skeleton.borrow_mut();
+                        let mut sk = self.effects.skeleton.borrow_mut();
                         sk.enabled() && sk.click_at(pos).is_some()
                     };
                     if skeleton_hit {
-                        self.skeleton_click_absorbed = true;
+                        self.effects.skeleton_click_absorbed = true;
                         return;
                     }
                 }
-                if button_state == ButtonState::Released && self.skeleton_click_absorbed {
-                    self.skeleton_click_absorbed = false;
+                if button_state == ButtonState::Released && self.effects.skeleton_click_absorbed {
+                    self.effects.skeleton_click_absorbed = false;
                     return;
                 }
 
@@ -288,7 +285,7 @@ impl EmskinState {
                     // Left-click on an embedded app → tell Emacs to select that window.
                     if event.button() == Some(MouseButton::Left) {
                         if let Some((window_id, view_id, _)) =
-                            self.apps.mirror_under(pos, self.active_workspace_id)
+                            self.apps.mirror_under(pos, self.workspace.active_id)
                         {
                             self.ipc.send(crate::ipc::OutgoingMessage::FocusView {
                                 window_id,
@@ -383,6 +380,47 @@ impl EmskinState {
 
             _ => {}
         }
+    }
+
+    /// emskin's winit window lost focus (Alt+Tab away, minimize, etc.).
+    /// Save the current keyboard focus and clear it so embedded clients
+    /// stop thinking they still have focus. `focus_changed` cascades the
+    /// clear to IME, data_device, and primary_selection. Pointer focus
+    /// is released here too (bundled with keyboard until winit gives us
+    /// separate `CursorLeft` events — YAGNI for now).
+    pub fn on_focus_leave(&mut self) {
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            self.focus.host_saved_focus = keyboard.current_focus();
+            keyboard.set_focus(self, None, serial);
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: pointer.current_location(),
+                    serial,
+                    time: 0,
+                },
+            );
+            pointer.frame(self);
+        }
+    }
+
+    /// emskin's winit window regained focus. Restore the keyboard focus
+    /// saved by `on_focus_leave`; the `focus_changed` cascade re-enables
+    /// IME (if the restored client has text_input_v3 bound) and rewires
+    /// data_device / primary_selection.
+    pub fn on_focus_enter(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let Some(saved) = self.focus.host_saved_focus.take() else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        keyboard.set_focus(self, Some(saved), serial);
     }
 }
 

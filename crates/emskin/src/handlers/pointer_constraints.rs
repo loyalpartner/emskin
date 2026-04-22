@@ -40,11 +40,12 @@ impl PointerConstraintsHandler for EmskinState {
         // back to (0,0), matching anvil's behaviour for that path.
         use smithay::wayland::seat::WaylandFocus;
         let origin = self
-            .space
+            .workspace
+            .active_space
             .elements()
             .find_map(|window| {
                 (window.wl_surface().as_deref() == Some(surface))
-                    .then(|| self.space.element_location(window))
+                    .then(|| self.workspace.active_space.element_location(window))
                     .flatten()
             })
             .map(|loc| loc.to_f64())

@@ -20,7 +20,7 @@ use smithay::{
         pointer::{CursorImageStatus, CursorImageSurfaceData},
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
-    reexports::{calloop::EventLoop, wayland_server::Resource},
+    reexports::calloop::EventLoop,
     utils::{Logical, Physical, Rectangle, Size, Transform, SERIAL_COUNTER},
     wayland::compositor::with_states,
 };
@@ -39,11 +39,11 @@ fn make_mode(size: Size<i32, Physical>) -> Mode {
 }
 
 fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
-    if let Some(title) = state.emacs_title.take() {
+    if let Some(title) = state.emacs.take_title() {
         backend.window().set_title(&title);
     }
 
-    if let Some(fullscreen) = state.pending_fullscreen.take() {
+    if let Some(fullscreen) = state.emacs.take_pending_fullscreen() {
         if fullscreen {
             backend
                 .window()
@@ -53,18 +53,17 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         }
     }
 
-    if let Some(maximize) = state.pending_maximize.take() {
+    if let Some(maximize) = state.emacs.take_pending_maximize() {
         backend.window().set_maximized(maximize);
     }
 
-    if let Some(allowed) = state.focus.pending_ime_allowed.take() {
-        backend.window().set_ime_allowed(allowed);
+    if let Some(enabled) = state.ime.take_ime_enabled() {
+        backend.window().set_ime_allowed(enabled);
     }
 
-    if state.cursor_changed {
-        state.cursor_changed = false;
+    if let Some(status) = state.cursor.take_changed() {
         let window = backend.window();
-        match &state.cursor_status {
+        match status {
             CursorImageStatus::Named(icon) => {
                 window.set_cursor_visible(true);
                 window.set_cursor(winit_crate::window::Cursor::Icon(*icon));
@@ -153,11 +152,11 @@ fn render_frame(
             .unwrap_or_else(|| Rectangle::from_size(output_size_log));
 
         // Edge-detect Emacs connection and trigger `splash.dismiss` once.
-        let emacs_now = state.emacs_surface.is_some();
-        if emacs_now && !state.last_emacs_connected {
-            state.splash.borrow_mut().dismiss();
+        let emacs_now = state.emacs.has_main_surface();
+        if emacs_now && !state.effects.last_emacs_connected {
+            state.effects.splash.borrow_mut().dismiss();
         }
-        state.last_emacs_connected = emacs_now;
+        state.effects.last_emacs_connected = emacs_now;
 
         // Non-effect elements: software cursor, layer shell surfaces, window
         // mirrors. emskin assembles these itself.
@@ -165,11 +164,9 @@ fn render_frame(
 
         // Software cursor (topmost of extras): used for Surface cursors
         // (GTK3/Emacs) that can't be forwarded via winit's CursorIcon API.
-        if let CursorImageStatus::Surface(ref surface) = state.cursor_status {
-            if !surface.is_alive() {
-                state.cursor_status = CursorImageStatus::default_named();
-                state.cursor_changed = true;
-            } else if let Some(pointer) = state.seat.get_pointer() {
+        state.cursor.ensure_alive();
+        if let CursorImageStatus::Surface(surface) = state.cursor.status() {
+            if let Some(pointer) = state.seat.get_pointer() {
                 if let Err(e) = import_surface_tree(renderer, surface) {
                     tracing::warn!("cursor import_surface_tree failed: {e:?}");
                 } else {
@@ -229,8 +226,8 @@ fn render_frame(
             output,
             renderer,
             &mut framebuffer,
-            &state.space,
-            &mut state.effect_chain,
+            &state.workspace.active_space,
+            &mut state.effects.chain,
             &effect_ctx,
             extras,
             damage_tracker,
@@ -290,14 +287,22 @@ fn render_frame(
     // dot stays in lockstep with whatever the recorder actually is.
     let now = state.start_time.elapsed();
     let overlay_at = state.recorder.overlay_started_at(now);
-    state.recorder_overlay.borrow_mut().set_active(overlay_at);
+    state
+        .effects
+        .recorder_overlay
+        .borrow_mut()
+        .set_active(overlay_at);
 
     // Recording ⇆ KeyCast linkage. Edge-trigger only so user toggles
     // (`SetKeyCast` IPC) outside a recording session aren't stomped.
     let recording_active = overlay_at.is_some();
-    if recording_active != state.last_recording_active {
-        state.last_recording_active = recording_active;
-        state.key_cast.borrow_mut().set_enabled(recording_active);
+    if recording_active != state.effects.last_recording_active {
+        state.effects.last_recording_active = recording_active;
+        state
+            .effects
+            .key_cast
+            .borrow_mut()
+            .set_enabled(recording_active);
         tracing::debug!(
             "key_cast auto-{} (recording {})",
             if recording_active { "on" } else { "off" },
@@ -318,7 +323,7 @@ fn render_frame(
 }
 
 fn post_render(state: &mut EmskinState, output: &Output) {
-    state.space.elements().for_each(|window| {
+    state.workspace.active_space.elements().for_each(|window| {
         window.send_frame(
             output,
             state.start_time.elapsed(),
@@ -342,7 +347,7 @@ fn post_render(state: &mut EmskinState, output: &Output) {
         }
     }
 
-    state.space.refresh();
+    state.workspace.active_space.refresh();
     state.wl.popups.cleanup();
 
     if let Err(e) = state.display_handle.flush_clients() {
@@ -365,7 +370,7 @@ pub fn init_winit(
         backend
             .window()
             .set_fullscreen(Some(winit_crate::window::Fullscreen::Borderless(None)));
-        state.pending_fullscreen = Some(true);
+        state.emacs.request_fullscreen(true);
     } else {
         backend.window().set_maximized(true);
     }
@@ -391,7 +396,7 @@ pub fn init_winit(
     );
     output.set_preferred(mode);
 
-    state.space.map_output(&output, (0, 0));
+    state.workspace.active_space.map_output(&output, (0, 0));
 
     init_dmabuf(&mut backend, state);
 
@@ -433,7 +438,7 @@ pub fn init_winit(
                         map.arrange();
                     }
 
-                    if state.initial_size_settled {
+                    if state.emacs.size_settled() {
                         // Re-lays out every Emacs frame against the fresh
                         // non_exclusive_zone and broadcasts SurfaceSize — also
                         // sets needs_redraw.
@@ -464,13 +469,16 @@ pub fn init_winit(
                     state.loop_signal.stop();
                 }
 
-                WinitEvent::Ime(ime) => {
-                    handle_ime_event(state, ime, backend.window());
+                WinitEvent::Ime(event) => {
+                    state
+                        .ime
+                        .on_host_ime_event(event, &state.seat, &state.apps, backend.window());
                     state.needs_redraw = true;
                 }
 
                 WinitEvent::Focus(focused) => {
                     if focused {
+                        state.on_focus_enter();
                         // Release all stuck keys to prevent phantom modifiers
                         // after Alt+Tab round-trip (the host eats the release).
                         let Some(keyboard) = state.seat.get_keyboard() else {
@@ -496,6 +504,8 @@ pub fn init_winit(
                                 );
                             }
                         }
+                    } else {
+                        state.on_focus_leave();
                     }
                     state.needs_redraw = true;
                 }
@@ -542,63 +552,4 @@ fn init_dmabuf(backend: &mut WinitGraphicsBackend<GlesRenderer>, state: &mut Ems
         }
     };
     state.wl.dmabuf_global = Some(global);
-}
-
-fn handle_ime_event(
-    state: &mut EmskinState,
-    ime: winit_crate::event::Ime,
-    window: &winit_crate::window::Window,
-) {
-    use smithay::wayland::text_input::TextInputSeat;
-    use winit_crate::event::Ime;
-
-    let ti = state.seat.text_input();
-
-    // Sync cursor area so the host IME popup appears near the text cursor.
-    // cursor_rectangle is surface-local; add the app's compositor position.
-    if let Some(rect) = ti.cursor_rectangle() {
-        let app_loc = ti
-            .focus()
-            .and_then(|s| state.apps.id_for_surface(&s))
-            .and_then(|id| state.apps.get(id))
-            .and_then(|app| app.geometry)
-            .map(|g| g.loc)
-            .unwrap_or_default();
-        window.set_ime_cursor_area(
-            winit_crate::dpi::LogicalPosition::new(
-                (rect.loc.x + app_loc.x) as f64,
-                (rect.loc.y + app_loc.y) as f64,
-            ),
-            winit_crate::dpi::LogicalSize::new(rect.size.w as f64, rect.size.h as f64),
-        );
-    }
-
-    match ime {
-        Ime::Preedit(text, cursor) => {
-            let (begin, end) = cursor
-                .map(|(b, e)| (b as i32, e as i32))
-                .unwrap_or((-1, -1));
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(Some(text.clone()), begin, end);
-            });
-            ti.done(false);
-        }
-        Ime::Commit(text) => {
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(None, 0, 0);
-                t.commit_string(Some(text.clone()));
-            });
-            ti.done(false);
-        }
-        Ime::Disabled => {
-            ti.with_focused_text_input(|t, _| {
-                t.preedit_string(None, 0, 0);
-            });
-            ti.done(false);
-            ti.leave();
-        }
-        Ime::Enabled => {
-            ti.enter();
-        }
-    }
 }

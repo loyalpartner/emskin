@@ -291,7 +291,7 @@ impl SkeletonOverlay {
         }
         self.entries.truncate(rects.len());
 
-        for (entry, rect) in self.entries.iter_mut().zip(rects.into_iter()) {
+        for (entry, rect) in self.entries.iter_mut().zip(rects) {
             // Text format: "<kind> <label> (x,y) WxH" (label skipped if empty).
             let text = if rect.label.is_empty() {
                 format!(

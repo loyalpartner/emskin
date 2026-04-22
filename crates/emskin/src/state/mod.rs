@@ -1,9 +1,22 @@
+pub mod apps;
+pub mod cursor;
+pub mod effects;
+pub mod emacs;
+pub mod focus;
+pub mod ime;
+pub mod workspace;
+pub mod xwayland;
+
+// Type re-exports for common shorthands (kept for historical call sites
+// that used `crate::KeyboardFocusTarget` before state/ existed).
+pub use focus::KeyboardFocusTarget;
+
 use std::{collections::HashMap, ffi::OsString, sync::Arc};
 
 use smithay::{
     backend::{renderer::gles::GlesRenderer, winit::WinitGraphicsBackend},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
-    input::{pointer::CursorImageStatus, Seat, SeatState},
+    input::{Seat, SeatState},
     reexports::{
         calloop::{
             generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
@@ -30,7 +43,7 @@ use smithay::{
         },
         shell::{
             wlr_layer::WlrLayerShellState,
-            xdg::{decoration::XdgDecorationState, ToplevelSurface, XdgShellState},
+            xdg::{decoration::XdgDecorationState, XdgShellState},
         },
         shm::ShmState,
         socket::ListeningSocketSource,
@@ -65,13 +78,26 @@ pub struct FocusState {
     /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
     /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
     pub prefix_saved_focus: Option<Option<crate::KeyboardFocusTarget>>,
-    /// Tracks text_input focus for manual enter/leave management. Kept as
-    /// `WlSurface` because text_input_v3 is a Wayland-only protocol.
-    pub text_input_focus: Option<WlSurface>,
-    /// Deferred `set_ime_allowed` for the winit window.
-    pub pending_ime_allowed: Option<bool>,
     /// Saved keyboard focus before a layer surface took it.
     pub layer_saved_focus: Option<crate::KeyboardFocusTarget>,
+    /// Saved keyboard focus when the host window lost focus; restored
+    /// on regain. Prevents embedded clients from thinking they still
+    /// have focus while the user Alt+Tab'd away from emskin.
+    pub host_saved_focus: Option<crate::KeyboardFocusTarget>,
+}
+
+impl FocusState {
+    /// Clear every saved-focus slot. Called on workspace switch: the
+    /// saved targets may reference surfaces in the departing workspace,
+    /// which become stale the moment `switch_workspace` swaps the
+    /// active `Space`. `on_focus_enter` / prefix restore / layer
+    /// dismissal all read these slots unconditionally and would
+    /// otherwise re-grant focus to a surface that's no longer mapped.
+    pub fn reset_on_workspace_switch(&mut self) {
+        self.prefix_saved_focus = None;
+        self.layer_saved_focus = None;
+        self.host_saved_focus = None;
+    }
 }
 
 /// Clipboard/selection routing state grouped together.
@@ -110,7 +136,6 @@ pub struct WaylandState {
     pub dmabuf_state: DmabufState,
     /// Keep-alive: dropping this removes the linux-dmabuf global from the display.
     pub dmabuf_global: Option<DmabufGlobal>,
-    pub text_input_manager_state: smithay::wayland::text_input::TextInputManagerState,
     /// Exposes `zwp_pointer_constraints_v1` — lock/confine pointer for games
     /// (Minecraft, Blender, browser Pointer Lock).
     pub pointer_constraints_state: PointerConstraintsState,
@@ -120,19 +145,9 @@ pub struct WaylandState {
     pub popups: PopupManager,
 }
 
-pub struct PendingCommand {
-    pub command: String,
-    pub args: Vec<String>,
-    pub standalone: bool,
-}
-
-/// Stored state for an inactive workspace (swapped out when another is active).
-pub struct Workspace {
-    pub space: Space<Window>,
-    pub emacs_surface: Option<WlSurface>,
-    /// Display name for the bar (extracted from Emacs frame title).
-    pub name: String,
-}
+/// Re-export so pre-extraction call sites (main.rs spawning the
+/// `--command` child) keep compiling without qualifying the path.
+pub use xwayland::PendingCommand;
 
 pub struct EmskinState {
     pub start_time: std::time::Instant,
@@ -142,21 +157,8 @@ pub struct EmskinState {
     pub ipc: crate::ipc::IpcServer,
     pub apps: crate::apps::AppManager,
 
-    // --- Workspace management ---
-    /// The active workspace's space (swapped in/out on switch).
-    pub space: Space<Window>,
-    /// Inactive workspaces, keyed by workspace id.
-    pub inactive_workspaces: HashMap<u64, Workspace>,
-    /// The id of the currently active workspace.
-    pub active_workspace_id: u64,
-    /// Display name of the active workspace (from Emacs frame title).
-    pub active_workspace_name: String,
-    /// Next workspace id to allocate.
-    pub next_workspace_id: u64,
-    /// Emacs toplevels awaiting parent() check (child frame detection).
-    pub pending_emacs_toplevels: Vec<(ToplevelSurface, Window)>,
-    /// ext-workspace-v1 protocol state.
-    pub workspace_protocol: crate::protocols::workspace::WorkspaceProtocolState,
+    /// Workspace model: active + inactive Emacs frames.
+    pub workspace: crate::workspace::WorkspaceState,
 
     pub loop_signal: LoopSignal,
     pub loop_handle: LoopHandle<'static, EmskinState>,
@@ -168,33 +170,18 @@ pub struct EmskinState {
     // Smithay protocol state (grouped for clarity).
     pub wl: WaylandState,
 
-    // XWayland: `xwls` owns the pre-bound X11 sockets and lazily
-    // spawns an external `xwayland-satellite` process on X client
-    // connect. `xdisplay` caches the `:N` number for convenience
-    // (exported as DISPLAY, sent to Emacs via IPC).
-    pub xdisplay: Option<u32>,
-    pub xwls: Option<crate::xwayland_satellite::XwlsIntegration>,
+    /// XWayland supervisor state — display number, xwayland-satellite
+    /// integration handle, and the `--command` deferred-spawn mailbox.
+    pub xwayland: xwayland::XwaylandState,
 
     pub seat: Seat<Self>,
 
     // --- emskin specific ---
-    /// The Emacs surface (first toplevel to connect)
-    pub emacs_surface: Option<WlSurface>,
-
-    /// Whether the initial size has been configured.
-    /// Set to true once Emacs receives the host window size in its first configure.
-    /// After this, host Resized events propagate size to Emacs.
-    pub initial_size_settled: bool,
-
-    /// When false, skip the "first toplevel == Emacs" heuristic and the
-    /// "last Emacs frame died → stop" shutdown path. Set from the
-    /// `EMSKIN_DISABLE_EMACS_DETECTION` env var at startup; intended
-    /// for E2E tests that spawn transient Wayland clients (wl-copy,
-    /// xclip, …) without a real Emacs ever attaching.
-    pub detect_emacs: bool,
-
-    /// Handle to the spawned Emacs process
-    pub emacs_child: Option<std::process::Child>,
+    /// Emacs host-process state — main surface, child process, title /
+    /// app_id metadata, detection and size-settle latches, plus the
+    /// `request_fullscreen` / `request_maximize` mailboxes the Emacs
+    /// toplevel populates via `xdg_toplevel.set_fullscreen` etc.
+    pub emacs: emacs::EmacsState,
 
     /// Handle to the spawned emskin-bar process (None = `--bar=none` or the
     /// binary couldn't be located). Kept alive so it's reaped on shutdown.
@@ -203,70 +190,23 @@ pub struct EmskinState {
     /// Path to extracted elisp dir (for cleanup on exit).
     pub elisp_dir: Option<std::path::PathBuf>,
 
-    /// Pending fullscreen request to forward to host window.
-    /// Some(true) = request fullscreen, Some(false) = exit fullscreen
-    pub pending_fullscreen: Option<bool>,
-
-    /// Pending maximize request to forward to host window.
-    pub pending_maximize: Option<bool>,
-
-    /// Emacs window title, forwarded to host toplevel
-    pub emacs_title: Option<String>,
-
-    /// Emacs app_id, forwarded to host toplevel
-    pub emacs_app_id: Option<String>,
-
-    /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
-    pub pending_command: Option<PendingCommand>,
-
     /// Clipboard/selection routing state.
     pub selection: SelectionState,
 
     /// Focus management state.
     pub focus: FocusState,
 
-    /// Registered overlays driven by effect-core's `EffectChain`.
-    pub effect_chain: effect_core::EffectChain,
+    /// IME (text_input_v3) bridge — host IME ↔ embedded Wayland clients.
+    pub ime: crate::ime::ImeBridge,
 
-    /// Typed handles to each overlay — same instance is also registered in
-    /// `effect_chain` via `EffectHandle`. Lets window-manager code (input
-    /// routing, IPC dispatch, workspace-switch reset) call the overlay's
-    /// typed setters directly without going through the trait.
-    pub measure: std::rc::Rc<std::cell::RefCell<effect_plugins::measure::MeasureOverlay>>,
-    pub skeleton: std::rc::Rc<std::cell::RefCell<effect_plugins::skeleton::SkeletonOverlay>>,
-    pub splash: std::rc::Rc<std::cell::RefCell<effect_plugins::splash::SplashScreen>>,
-    pub cursor_trail: std::rc::Rc<std::cell::RefCell<effect_plugins::cursor_trail::CursorTrail>>,
-    pub jelly_cursor: std::rc::Rc<std::cell::RefCell<effect_plugins::jelly_cursor::JellyCursor>>,
-    pub recorder_overlay:
-        std::rc::Rc<std::cell::RefCell<effect_plugins::recorder::RecorderOverlay>>,
-    pub key_cast: std::rc::Rc<std::cell::RefCell<effect_plugins::key_cast::KeyCastOverlay>>,
+    /// Built-in visual overlays + their host-side edge-detect flags.
+    /// Grouped so the render loop and workspace-switch reset both see
+    /// a single cohesive module instead of eleven flat fields.
+    pub effects: effects::EffectsState,
 
-    /// Whether a skeleton label-click was swallowed — matching release must
-    /// also be swallowed. Lives in the window manager, not the overlay.
-    pub skeleton_click_absorbed: bool,
-
-    /// Edge-detect latch for "Emacs just connected" → triggers `splash.dismiss()`
-    /// exactly once. Initialised false; set to true the first frame Emacs's
-    /// surface is present.
-    pub last_emacs_connected: bool,
-
-    /// Edge-detect latch for "recording state changed" → toggles
-    /// `key_cast` overlay on/off so screencasts always show keystrokes
-    /// without the user having to enable it separately.
-    pub last_recording_active: bool,
-
-    /// Current cursor image status. For Named, the host cursor is used;
-    /// for Surface (GTK3/Emacs), the cursor is software-rendered each frame.
-    pub cursor_status: CursorImageStatus,
-    /// Set when cursor_status changes; consumed by apply_pending_state.
-    pub cursor_changed: bool,
-
-    /// Last raw absolute pointer location from the host, in compositor
-    /// coords. Used to synthesize relative-motion deltas for
-    /// `zwp_relative_pointer_v1` (required by FPS games) — the winit
-    /// backend only emits absolute positions, so we diff consecutive
-    /// absolutes to produce the delta. `None` on first event.
-    pub last_pointer_raw_loc: Option<Point<f64, Logical>>,
+    /// Cursor image tracking (Named / Surface) + raw pointer location
+    /// for `zwp_relative_pointer_v1` delta synthesis.
+    pub cursor: cursor::CursorState,
 
     /// Coarse damage flag for structural events (IPC, layer shell, input,
     /// workspace switch) that smithay's per-element OutputDamageTracker does
@@ -300,8 +240,7 @@ impl EmskinState {
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
-        let text_input_manager_state =
-            smithay::wayland::text_input::TextInputManagerState::new::<Self>(&dh);
+        let ime = crate::ime::ImeBridge::new(&dh);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let relative_pointer_manager_state = RelativePointerManagerState::new::<Self>(&dh);
         let dmabuf_state = DmabufState::new();
@@ -332,40 +271,6 @@ impl EmskinState {
 
         let loop_signal = event_loop.get_signal();
 
-        // Overlays: same instance shared between the typed handle kept on
-        // `EmskinState` (for input routing, IPC dispatch, workspace-switch
-        // reset) and the `EffectHandle` wrapper registered into the chain
-        // (for rendering). `register_overlay` does both in one step.
-        let mut effect_chain = effect_core::EffectChain::default();
-        let splash = register_overlay(
-            &mut effect_chain,
-            effect_plugins::splash::SplashScreen::new(),
-        );
-        let skeleton = register_overlay(
-            &mut effect_chain,
-            effect_plugins::skeleton::SkeletonOverlay::new(),
-        );
-        let measure = register_overlay(
-            &mut effect_chain,
-            effect_plugins::measure::MeasureOverlay::new(),
-        );
-        let cursor_trail = register_overlay(
-            &mut effect_chain,
-            effect_plugins::cursor_trail::CursorTrail::new(),
-        );
-        let jelly_cursor = register_overlay(
-            &mut effect_chain,
-            effect_plugins::jelly_cursor::JellyCursor::new(),
-        );
-        let recorder_overlay = register_overlay(
-            &mut effect_chain,
-            effect_plugins::recorder::RecorderOverlay::new(),
-        );
-        let key_cast = register_overlay(
-            &mut effect_chain,
-            effect_plugins::key_cast::KeyCastOverlay::new(),
-        );
-
         Ok(Self {
             start_time,
             display_handle: dh,
@@ -373,13 +278,15 @@ impl EmskinState {
             ipc,
             apps: crate::apps::AppManager::default(),
 
-            space,
-            inactive_workspaces: HashMap::new(),
-            active_workspace_id: 1,
-            active_workspace_name: String::new(),
-            next_workspace_id: 2,
-            pending_emacs_toplevels: Vec::new(),
-            workspace_protocol,
+            workspace: crate::workspace::WorkspaceState {
+                active_space: space,
+                inactive: HashMap::new(),
+                active_id: 1,
+                active_name: String::new(),
+                next_id: 2,
+                pending_emacs_toplevels: Vec::new(),
+                protocol: workspace_protocol,
+            },
 
             loop_signal,
             loop_handle,
@@ -404,43 +311,24 @@ impl EmskinState {
                 ext_data_control_state,
                 dmabuf_state,
                 dmabuf_global: None,
-                text_input_manager_state,
                 pointer_constraints_state,
                 relative_pointer_manager_state,
                 popups,
             },
-            xdisplay: None,
-            xwls: None,
+            xwayland: xwayland::XwaylandState::default(),
             seat,
 
             // emskin specific
-            emacs_surface: None,
-            initial_size_settled: false,
-            detect_emacs: std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
-            emacs_child: None,
+            emacs: emacs::EmacsState::new(
+                std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
+            ),
             bar_child: None,
             elisp_dir: None,
-            pending_fullscreen: None,
-            pending_maximize: None,
-            emacs_title: None,
-            emacs_app_id: None,
-            pending_command: None,
             selection: SelectionState::default(),
             focus: FocusState::default(),
-            effect_chain,
-            measure,
-            skeleton,
-            splash,
-            cursor_trail,
-            jelly_cursor,
-            recorder_overlay,
-            key_cast,
-            skeleton_click_absorbed: false,
-            last_emacs_connected: false,
-            last_recording_active: false,
-            cursor_status: CursorImageStatus::default_named(),
-            cursor_changed: false,
-            last_pointer_raw_loc: None,
+            ime,
+            effects: effects::EffectsState::default(),
+            cursor: cursor::CursorState::default(),
             needs_redraw: true,
             recorder: crate::recording::Recorder::new(),
         })
@@ -502,7 +390,7 @@ impl EmskinState {
 
     /// Fullscreen geometry for the primary output (logical pixels).
     pub fn output_fullscreen_geo(&self) -> Option<Rectangle<i32, Logical>> {
-        let output = self.space.outputs().next()?;
+        let output = self.workspace.active_space.outputs().next()?;
         let mode = output.current_mode()?;
         let scale = output.current_scale().fractional_scale();
         let logical = mode.size.to_f64().to_logical(scale).to_i32_round();
@@ -527,7 +415,7 @@ impl EmskinState {
     /// Delegates to smithay's `LayerMap::non_exclusive_zone()`; falls back to
     /// full output when no layers or no output.
     pub fn usable_area(&self) -> Rectangle<i32, Logical> {
-        let Some(output) = self.space.outputs().next() else {
+        let Some(output) = self.workspace.active_space.outputs().next() else {
             return Rectangle::default();
         };
         smithay::desktop::layer_map_for_output(output).non_exclusive_zone()
@@ -540,7 +428,7 @@ impl EmskinState {
     /// space by setting `exclusive_zone` on their layer surfaces and the
     /// geometry adjusts automatically.
     pub fn emacs_geometry(&self) -> Option<Rectangle<i32, Logical>> {
-        self.space.outputs().next()?;
+        self.workspace.active_space.outputs().next()?;
         Some(self.usable_area())
     }
 
@@ -549,8 +437,9 @@ impl EmskinState {
     /// including gtk3 Emacs over XWayland — presents as a Wayland
     /// toplevel, so there is no separate X11 branch.
     pub fn emacs_window(&self) -> Option<Window> {
-        let surface = self.emacs_surface.as_ref()?;
-        self.space
+        let surface = self.emacs.surface()?;
+        self.workspace
+            .active_space
             .elements()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
@@ -595,14 +484,15 @@ impl EmskinState {
         &self,
         surface: &WlSurface,
     ) -> Option<crate::KeyboardFocusTarget> {
-        if let Some(output) = self.space.outputs().next() {
+        if let Some(output) = self.workspace.active_space.outputs().next() {
             let map = smithay::desktop::layer_map_for_output(output);
             if let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
                 return Some(crate::KeyboardFocusTarget::from(layer.clone()));
             }
         }
         if let Some(window) = self
-            .space
+            .workspace
+            .active_space
             .elements()
             .find(|w| w.wl_surface().as_deref().is_some_and(|s| s == surface))
             .cloned()
@@ -622,19 +512,19 @@ impl EmskinState {
             return false;
         };
         let old_ws = app.workspace_id;
-        if old_ws == self.active_workspace_id {
+        if old_ws == self.workspace.active_id {
             return false;
         }
         let window = app.window.clone();
         tracing::debug!(
             "app {window_id} migrating workspace {old_ws} → {}",
-            self.active_workspace_id
+            self.workspace.active_id
         );
-        if let Some(old_space) = self.space_for_workspace_mut(old_ws) {
+        if let Some(old_space) = self.workspace.space_for_mut(old_ws) {
             old_space.unmap_elem(&window);
         }
         if let Some(app) = self.apps.get_mut(window_id) {
-            app.workspace_id = self.active_workspace_id;
+            app.workspace_id = self.workspace.active_id;
             // Reset geometry so the next set_geometry immediately maps the app
             // instead of going through the pending path (which would deadlock:
             // app needs frame callbacks to commit, but it's not in any Space).
@@ -645,112 +535,69 @@ impl EmskinState {
         true
     }
 
-    /// Allocate a new workspace id.
-    pub fn alloc_workspace_id(&mut self) -> u64 {
-        let id = self.next_workspace_id;
-        self.next_workspace_id += 1;
-        id
-    }
-
-    /// Total number of workspaces (active + inactive).
-    pub fn workspace_count(&self) -> usize {
-        1 + self.inactive_workspaces.len()
-    }
-
     /// Check if a surface belongs to the same Wayland client as the active Emacs.
     pub fn is_emacs_client(&self, surface: &WlSurface) -> bool {
-        self.emacs_surface
-            .as_ref()
+        self.emacs
+            .surface()
             .is_some_and(|emacs| emacs.same_client_as(&surface.id()))
     }
 
     /// Check if a surface is any workspace's Emacs surface (active or inactive).
     pub fn is_any_emacs_surface(&self, surface: &WlSurface) -> bool {
-        if self.emacs_surface.as_ref() == Some(surface) {
+        if self.emacs.is_main_surface(surface) {
             return true;
         }
-        self.inactive_workspaces
+        self.workspace
+            .inactive
             .values()
             .any(|ws| ws.emacs_surface.as_ref() == Some(surface))
-    }
-
-    /// Get mutable reference to the space for a given workspace id.
-    /// Returns the active space if `ws_id` matches, otherwise looks up inactive.
-    pub fn space_for_workspace_mut(&mut self, ws_id: u64) -> Option<&mut Space<Window>> {
-        if ws_id == self.active_workspace_id {
-            Some(&mut self.space)
-        } else {
-            self.inactive_workspaces
-                .get_mut(&ws_id)
-                .map(|ws| &mut ws.space)
-        }
-    }
-
-    /// Sorted list of all workspace ids.
-    pub fn all_workspace_ids(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = std::iter::once(self.active_workspace_id)
-            .chain(self.inactive_workspaces.keys().copied())
-            .collect();
-        ids.sort_unstable();
-        ids
     }
 
     /// Switch the active workspace. Returns false if target is already active
     /// or doesn't exist.
     pub fn switch_workspace(&mut self, target_id: u64) -> bool {
-        if target_id == self.active_workspace_id {
+        if target_id == self.workspace.active_id {
             return false;
         }
-        let Some(mut target) = self.inactive_workspaces.remove(&target_id) else {
+        let Some(mut target) = self.workspace.inactive.remove(&target_id) else {
             return false;
         };
 
         // Swap: current active → inactive, target → active.
-        let old_space = std::mem::take(&mut self.space);
-        let old_emacs = self.emacs_surface.take();
-        let old_name = std::mem::take(&mut self.active_workspace_name);
-        self.inactive_workspaces.insert(
-            self.active_workspace_id,
-            Workspace {
+        let old_space = std::mem::take(&mut self.workspace.active_space);
+        let old_emacs = self.emacs.take_surface();
+        let old_name = std::mem::take(&mut self.workspace.active_name);
+        self.workspace.inactive.insert(
+            self.workspace.active_id,
+            crate::workspace::Workspace {
                 space: old_space,
                 emacs_surface: old_emacs,
                 name: old_name,
             },
         );
 
-        self.space = target.space;
-        self.emacs_surface = target.emacs_surface.take();
-        self.active_workspace_name = target.name;
-        self.active_workspace_id = target_id;
+        self.workspace.active_space = target.space;
+        self.emacs.set_surface(target.emacs_surface.take());
+        self.workspace.active_name = target.name;
+        self.workspace.active_id = target_id;
 
         // App migration is handled by IPC set_geometry from Emacs (sync-all).
         // The compositor does NOT auto-migrate because it doesn't know which
         // apps are displayed in which Emacs frame.
 
         // Reset state that references the old workspace's surfaces.
-        self.focus.prefix_saved_focus = None;
-        self.focus.layer_saved_focus = None;
-        self.focus.text_input_focus = None;
-        self.focus.pending_ime_allowed = Some(false);
-        // Reset skeleton state for the new workspace (window manager drives this,
-        // not the effect trait).
-        {
-            let mut sk = self.skeleton.borrow_mut();
-            sk.set_enabled(false);
-            sk.clear();
-        }
-        self.skeleton_click_absorbed = false;
-        // Reset caret tracking so the jelly overlay doesn't animate from
-        // the previous workspace's caret position to the new one. The
-        // new workspace's Emacs will send fresh SetCursorRect messages
-        // after focus stabilizes.
-        let now = self.start_time.elapsed();
-        self.jelly_cursor.borrow_mut().update(None, now);
+        // `host_saved_focus` MUST be cleared alongside the prefix/layer
+        // slots — otherwise an Alt+Tab-away → workspace-switch → Alt+Tab-
+        // back sequence restores focus to a surface in the now-inactive
+        // workspace (sending `wl_keyboard.enter` to an unmapped client).
+        // Centralising this in `FocusState::reset_on_workspace_switch`
+        // makes future field additions self-documenting.
+        self.focus.reset_on_workspace_switch();
+        self.ime.reset_on_workspace_switch();
+        self.effects
+            .reset_on_workspace_switch(self.start_time.elapsed());
 
-        if matches!(self.cursor_status, CursorImageStatus::Surface(_)) {
-            self.cursor_status = CursorImageStatus::default_named();
-            self.cursor_changed = true;
-        }
+        self.cursor.reset_on_workspace_switch();
 
         // Notify Emacs BEFORE changing keyboard focus. IPC is flushed
         // immediately (same syscall), while wl_keyboard.enter is buffered
@@ -784,14 +631,14 @@ impl EmskinState {
 
         tracing::info!(
             "switched to workspace {target_id} (total={})",
-            self.workspace_count()
+            self.workspace.count()
         );
         true
     }
 
     /// Remove an inactive workspace and its embedded apps.
-    pub fn destroy_workspace(&mut self, workspace_id: u64) -> Option<Workspace> {
-        let ws = self.inactive_workspaces.remove(&workspace_id)?;
+    pub fn destroy_workspace(&mut self, workspace_id: u64) -> Option<crate::workspace::Workspace> {
+        let ws = self.workspace.inactive.remove(&workspace_id)?;
         // Remove all apps belonging to this workspace.
         let dead_app_ids: Vec<u64> = self
             .apps
@@ -808,7 +655,7 @@ impl EmskinState {
         }
         tracing::info!(
             "destroyed workspace {workspace_id} (total={})",
-            self.workspace_count()
+            self.workspace.count()
         );
         Some(ws)
     }
@@ -821,7 +668,7 @@ impl EmskinState {
         //    Use app.geometry (always available) instead of space.element_geometry
         //    because the source window may be unmapped (visible=false).
         if let Some((window_id, _view_id, mapped_pos)) =
-            self.apps.mirror_under(pos, self.active_workspace_id)
+            self.apps.mirror_under(pos, self.workspace.active_id)
         {
             if let Some(app) = self.apps.get(window_id) {
                 if let Some(geo) = app.geometry {
@@ -861,7 +708,8 @@ impl EmskinState {
         }
 
         // 3. Space elements.
-        self.space
+        self.workspace
+            .active_space
             .element_under(pos)
             .and_then(|(window, location)| {
                 window
@@ -877,7 +725,7 @@ impl EmskinState {
         use smithay::desktop::layer_map_for_output;
         use smithay::wayland::shell::wlr_layer::Layer;
 
-        let output = self.space.outputs().next()?;
+        let output = self.workspace.active_space.outputs().next()?;
         let map = layer_map_for_output(output);
 
         for layer in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
@@ -900,7 +748,7 @@ impl EmskinState {
 
 impl crate::xwayland_satellite::HasXwls for EmskinState {
     fn xwls_mut(&mut self) -> Option<&mut crate::xwayland_satellite::XwlsIntegration> {
-        self.xwls.as_mut()
+        self.xwayland.integration_mut()
     }
 }
 
@@ -921,12 +769,12 @@ impl EmskinState {
             geo.size.h,
         );
 
-        // Active workspace's Emacs surface lives in self.space.
-        let active_emacs = self.emacs_surface.clone();
-        resize_emacs_in_space(&mut self.space, &active_emacs, geo);
+        // Active workspace's Emacs surface lives in self.workspace.active_space.
+        let active_emacs = self.emacs.surface().cloned();
+        resize_emacs_in_space(&mut self.workspace.active_space, &active_emacs, geo);
 
         // Inactive workspaces each hold their own space + Emacs.
-        for ws in self.inactive_workspaces.values_mut() {
+        for ws in self.workspace.inactive.values_mut() {
             resize_emacs_in_space(&mut ws.space, &ws.emacs_surface, geo);
         }
 
@@ -986,13 +834,66 @@ impl ClientData for ClientState {
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
 
-/// Register an overlay into the chain and return a typed handle to the same
-/// instance. Lets `EmskinState::new` construct each overlay with one line.
-fn register_overlay<T: effect_core::Effect + 'static>(
-    chain: &mut effect_core::EffectChain,
-    value: T,
-) -> std::rc::Rc<std::cell::RefCell<T>> {
-    let rc = std::rc::Rc::new(std::cell::RefCell::new(value));
-    chain.register(effect_core::EffectHandle::new(rc.clone()));
-    rc
+#[cfg(test)]
+mod focus_state_tests {
+    use super::*;
+
+    // `KeyboardFocusTarget` wraps smithay types (`Window`, `LayerSurface`,
+    // `PopupKind`) that require a live Wayland `Display` + `Client` to
+    // instantiate, so `layer_saved_focus` and `host_saved_focus` can only
+    // be populated via the e2e suite. `prefix_saved_focus` has the
+    // `Option<Option<...>>` shape — `Some(None)` means "prefix sequence
+    // active, no prior focus", a valid sentinel we *can* construct here.
+    // That one exercise is enough to catch the classic "method forgets to
+    // touch a field" bug; the other two slots are covered by
+    // `tests/e2e_*` workspace-switch paths.
+
+    #[test]
+    fn default_is_all_none() {
+        let f = FocusState::default();
+        assert!(f.prefix_saved_focus.is_none());
+        assert!(f.layer_saved_focus.is_none());
+        assert!(f.host_saved_focus.is_none());
+    }
+
+    #[test]
+    fn reset_clears_populated_prefix_saved_focus() {
+        let mut f = FocusState::default();
+        f.prefix_saved_focus = Some(None);
+        assert!(f.prefix_saved_focus.is_some(), "precondition");
+
+        f.reset_on_workspace_switch();
+
+        assert!(
+            f.prefix_saved_focus.is_none(),
+            "reset must clear prefix_saved_focus"
+        );
+    }
+
+    #[test]
+    fn reset_is_idempotent_on_default_state() {
+        let mut f = FocusState::default();
+        f.reset_on_workspace_switch();
+        assert!(f.prefix_saved_focus.is_none());
+        assert!(f.layer_saved_focus.is_none());
+        assert!(f.host_saved_focus.is_none());
+    }
+
+    #[test]
+    fn reset_clears_every_saved_focus_slot_enumerated() {
+        // Regression guard: a future field added to FocusState and
+        // forgotten in reset_on_workspace_switch will not be caught by
+        // `default_is_all_none` alone. This test enumerates every
+        // currently-existing slot so a reviewer adding a new slot has a
+        // concrete checklist to update here. If you add a field to
+        // FocusState, add its .is_none() assertion below *and* its
+        // corresponding `self.<field> = None` to the method.
+        let mut f = FocusState::default();
+        f.prefix_saved_focus = Some(None);
+        f.reset_on_workspace_switch();
+
+        assert!(f.prefix_saved_focus.is_none(), "slot 1: prefix_saved_focus");
+        assert!(f.layer_saved_focus.is_none(), "slot 2: layer_saved_focus");
+        assert!(f.host_saved_focus.is_none(), "slot 3: host_saved_focus");
+    }
 }

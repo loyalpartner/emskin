@@ -22,7 +22,7 @@ impl WlrLayerShellHandler for EmskinState {
     ) {
         let desktop_layer = DesktopLayerSurface::new(surface, namespace.clone());
 
-        let Some(output) = self.space.outputs().next().cloned() else {
+        let Some(output) = self.workspace.active_space.outputs().next().cloned() else {
             tracing::warn!("layer_shell: no output, closing surface (namespace={namespace})");
             desktop_layer.layer_surface().send_close();
             return;
@@ -76,21 +76,22 @@ impl WlrLayerShellHandler for EmskinState {
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
-        let (zone_before, zone_after) = if let Some(output) = self.space.outputs().next().cloned() {
-            let mut map = layer_map_for_output(&output);
-            let before = map.non_exclusive_zone();
-            let found = map
-                .layer_for_surface(surface.wl_surface(), WindowSurfaceType::TOPLEVEL)
-                .cloned();
-            if let Some(layer) = found {
-                map.unmap_layer(&layer);
-            }
-            let after = map.non_exclusive_zone();
-            drop(map);
-            (before, after)
-        } else {
-            (Default::default(), Default::default())
-        };
+        let (zone_before, zone_after) =
+            if let Some(output) = self.workspace.active_space.outputs().next().cloned() {
+                let mut map = layer_map_for_output(&output);
+                let before = map.non_exclusive_zone();
+                let found = map
+                    .layer_for_surface(surface.wl_surface(), WindowSurfaceType::TOPLEVEL)
+                    .cloned();
+                if let Some(layer) = found {
+                    map.unmap_layer(&layer);
+                }
+                let after = map.non_exclusive_zone();
+                drop(map);
+                (before, after)
+            } else {
+                (Default::default(), Default::default())
+            };
 
         tracing::info!("layer_shell: surface destroyed");
 

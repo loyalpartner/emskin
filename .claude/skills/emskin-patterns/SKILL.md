@@ -80,17 +80,17 @@ History shows this exact sequence for every new effect (`key_cast`,
 
 1. `crates/effect-plugins/src/<name>.rs` — new file, `impl Effect`
 2. `crates/effect-plugins/src/lib.rs` — `pub mod <name>;`
-3. `crates/emskin/src/state.rs` — register handle via `register_overlay(...)`
-4. `crates/emskin/src/ipc/messages.rs` + `ipc/dispatch.rs` — `Set<Name>` variant
+3. `crates/emskin/src/state/effects.rs` — add an `Rc<RefCell<T>>` field to `EffectsState` and a `register(&mut chain, YourOverlay::new())` call inside `EffectsState::default()`
+4. `crates/emskin/src/ipc/messages.rs` + `ipc/dispatch.rs` — `Set<Name>` variant; dispatch reaches the overlay via `state.effects.<name>.borrow_mut()`
 5. `elisp/emskin-<name>.el` — `emskin-define-bool-effect` or
    `emskin-define-toggle` macro; auto-registered on `emskin-connected-hook`
 
 ### Code change → CLAUDE.md update
 
-`crates/emskin/CLAUDE.md` has 16 changes vs. 25 in `state.rs`. Non-obvious
-invariants, gotchas, and protocol quirks land in that file alongside the
-code. If your fix was tricky enough to deserve a comment, also add a bullet
-under the matching section in `CLAUDE.md`.
+`crates/emskin/CLAUDE.md` accumulates non-obvious invariants, gotchas,
+and protocol quirks alongside the code. If your fix was tricky enough
+to deserve a comment, also add a bullet under the matching section in
+`CLAUDE.md`.
 
 ## Versioning & release
 

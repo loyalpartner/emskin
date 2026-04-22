@@ -40,19 +40,19 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
         }
         IncomingMessage::SetMeasure { enabled } => {
             tracing::debug!("IPC set_measure enabled={enabled}");
-            state.measure.borrow_mut().set_enabled(enabled);
+            state.effects.measure.borrow_mut().set_enabled(enabled);
         }
         IncomingMessage::SetCursorTrail { enabled } => {
             tracing::debug!("IPC set_cursor_trail enabled={enabled}");
-            state.cursor_trail.borrow_mut().set_enabled(enabled);
+            state.effects.cursor_trail.borrow_mut().set_enabled(enabled);
         }
         IncomingMessage::SetKeyCast { enabled } => {
             tracing::debug!("IPC set_key_cast enabled={enabled}");
-            state.key_cast.borrow_mut().set_enabled(enabled);
+            state.effects.key_cast.borrow_mut().set_enabled(enabled);
         }
         IncomingMessage::SetSkeleton { enabled, rects } => {
             tracing::debug!("IPC set_skeleton enabled={enabled} rects={}", rects.len());
-            let mut sk = state.skeleton.borrow_mut();
+            let mut sk = state.effects.skeleton.borrow_mut();
             sk.set_enabled(enabled);
             if enabled {
                 sk.set_rects(rects);
@@ -68,7 +68,7 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
         }
         IncomingMessage::SetJellyCursor { enabled } => {
             tracing::debug!("IPC set_jelly_cursor enabled={enabled}");
-            state.jelly_cursor.borrow_mut().set_enabled(enabled);
+            state.effects.jelly_cursor.borrow_mut().set_enabled(enabled);
         }
         IncomingMessage::SetCursorRect { rect, color } => {
             ipc_set_cursor_rect(state, rect, color);
@@ -119,7 +119,7 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
 fn ipc_set_cursor_rect(state: &mut EmskinState, rect: crate::ipc::IpcRect, color: Option<String>) {
     let now = state.start_time.elapsed();
     let canvas_rect = state.emacs_rect_to_canvas(rect);
-    let mut jc = state.jelly_cursor.borrow_mut();
+    let mut jc = state.effects.jelly_cursor.borrow_mut();
     if let Some(hex) = color.as_deref() {
         jc.set_color_hex(hex);
     }
@@ -166,12 +166,15 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, rect: crate::ipc::I
     if app.geometry.is_none() {
         app.geometry = Some(new_geo);
         let window = app.window.clone();
-        state.space.map_element(window, new_geo.loc, false);
+        state
+            .workspace
+            .active_space
+            .map_element(window, new_geo.loc, false);
         tracing::info!(
             "app {window_id} mapped immediately at ({},{}) ws={}",
             new_geo.loc.x,
             new_geo.loc.y,
-            state.active_workspace_id
+            state.workspace.active_id
         );
     } else {
         app.pending_geometry = Some(new_geo);
@@ -180,7 +183,7 @@ fn ipc_set_geometry(state: &mut EmskinState, window_id: u64, rect: crate::ipc::I
             "app {window_id} pending geometry ({},{}) ws={}",
             new_geo.loc.x,
             new_geo.loc.y,
-            state.active_workspace_id
+            state.workspace.active_id
         );
     }
 }
@@ -205,7 +208,7 @@ fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
     if !visible {
         // Unmap from whichever space it's in.
         let ws_id = app.workspace_id;
-        if let Some(space) = state.space_for_workspace_mut(ws_id) {
+        if let Some(space) = state.workspace.space_for_mut(ws_id) {
             space.unmap_elem(&win);
         }
     } else if let Some(geo) = geo {
@@ -214,7 +217,10 @@ fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
         if let Some(app) = state.apps.get_mut(window_id) {
             app.geometry = Some(geo);
         }
-        state.space.map_element(win, geo.loc, false);
+        state
+            .workspace
+            .active_space
+            .map_element(win, geo.loc, false);
     }
 }
 
@@ -238,7 +244,7 @@ fn ipc_add_mirror(
 ) {
     let crate::ipc::IpcRect { x, y, w, h } = rect;
     // Compositor auto-binds to active workspace.
-    let ws_id = state.active_workspace_id;
+    let ws_id = state.workspace.active_id;
     tracing::debug!(
         "IPC add_mirror window={window_id} view={view_id} ({x},{y},{w},{h}) ws={ws_id}"
     );
@@ -325,18 +331,21 @@ fn ipc_promote_mirror(state: &mut EmskinState, window_id: u64, view_id: u64) {
         if old_ws != new_ws {
             // Cross-workspace migration: unmap from old, map in new.
             app.workspace_id = new_ws;
-            if let Some(space) = state.space_for_workspace_mut(old_ws) {
+            if let Some(space) = state.workspace.space_for_mut(old_ws) {
                 space.unmap_elem(&window);
             }
             // Re-borrow for the target workspace.
             let app_geo = state.apps.get(window_id).and_then(|a| a.geometry);
             if let Some(geo) = app_geo {
-                if let Some(space) = state.space_for_workspace_mut(new_ws) {
+                if let Some(space) = state.workspace.space_for_mut(new_ws) {
                     space.map_element(window, geo.loc, false);
                 }
             }
         } else {
-            state.space.map_element(window, mirror.geometry.loc, false);
+            state
+                .workspace
+                .active_space
+                .map_element(window, mirror.geometry.loc, false);
         }
     }
 }

@@ -227,7 +227,7 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for EmskinState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         let manager = data_init.init(resource, ());
-        state.workspace_protocol.instances.push(ManagerInstance {
+        state.workspace.protocol.instances.push(ManagerInstance {
             manager,
             group: None,
             workspaces: HashMap::new(),
@@ -254,7 +254,8 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for EmskinState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         let Some(inst) = state
-            .workspace_protocol
+            .workspace
+            .protocol
             .instances
             .iter_mut()
             .find(|i| Resource::id(&i.manager) == Resource::id(resource))
@@ -282,7 +283,8 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for EmskinState {
         _data: &(),
     ) {
         state
-            .workspace_protocol
+            .workspace
+            .protocol
             .instances
             .retain(|i| i.manager.id() != resource.id());
     }
@@ -305,7 +307,7 @@ impl Dispatch<ExtWorkspaceGroupHandleV1, ()> for EmskinState {
         match request {
             ext_workspace_group_handle_v1::Request::CreateWorkspace { workspace } => {
                 tracing::info!("ext-workspace-v1: create_workspace({workspace})");
-                if let Some(inst) = state.workspace_protocol.instances.first_mut() {
+                if let Some(inst) = state.workspace.protocol.instances.first_mut() {
                     inst.actions
                         .push(WorkspaceAction::CreateWorkspace(workspace));
                 }
@@ -332,7 +334,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for EmskinState {
     ) {
         // Find workspace_id for this handle by comparing ObjectId.
         let resource_oid = Resource::id(resource);
-        let ws_id = state.workspace_protocol.instances.iter().find_map(|inst| {
+        let ws_id = state.workspace.protocol.instances.iter().find_map(|inst| {
             inst.workspaces
                 .iter()
                 .find(|(_, h)| Resource::id(*h) == resource_oid)
@@ -340,7 +342,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for EmskinState {
         });
         let Some(ws_id) = ws_id else { return };
 
-        let inst = state.workspace_protocol.instances.iter_mut().find(|i| {
+        let inst = state.workspace.protocol.instances.iter_mut().find(|i| {
             i.workspaces
                 .values()
                 .any(|h| Resource::id(h) == resource_oid)

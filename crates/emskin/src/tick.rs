@@ -3,13 +3,14 @@
 use smithay::reexports::wayland_server::Resource;
 
 use crate::ipc::OutgoingMessage;
-use crate::state::{EmskinState, Workspace};
+use crate::state::EmskinState;
+use crate::workspace::Workspace;
 
 /// Called once per event loop iteration. Handles workspace lifecycle,
 /// IPC dispatch, clipboard events, and pending geometry timeouts.
 pub fn event_loop_tick(state: &mut EmskinState) {
     // --- Check if Emacs child process has exited ---
-    if let Some(ref mut child) = state.emacs_child {
+    if let Some(child) = state.emacs.child_mut() {
         if let Ok(Some(status)) = child.try_wait() {
             tracing::info!("Emacs exited with {status}, stopping compositor");
             state.loop_signal.stop();
@@ -94,8 +95,8 @@ pub fn event_loop_tick(state: &mut EmskinState) {
             .apps
             .get(window_id)
             .map(|a| a.workspace_id)
-            .unwrap_or(state.active_workspace_id);
-        if let Some(space) = state.space_for_workspace_mut(ws_id) {
+            .unwrap_or(state.workspace.active_id);
+        if let Some(space) = state.workspace.space_for_mut(ws_id) {
             space.map_element(window, geo.loc, false);
         }
         tracing::debug!("embedded app window_id={window_id} geometry force-committed (timeout)");
@@ -103,7 +104,7 @@ pub fn event_loop_tick(state: &mut EmskinState) {
 }
 
 fn process_pending_toplevels(state: &mut EmskinState) {
-    let pending = std::mem::take(&mut state.pending_emacs_toplevels);
+    let pending = std::mem::take(&mut state.workspace.pending_emacs_toplevels);
     if pending.is_empty() {
         return;
     }
@@ -113,23 +114,23 @@ fn process_pending_toplevels(state: &mut EmskinState) {
             // Child frame (posframe, etc.) — leave in current space, GTK manages.
             tracing::info!(
                 "Emacs child frame confirmed (has parent), workspace {}",
-                state.active_workspace_id
+                state.workspace.active_id
             );
         } else {
             // Real new Emacs frame — create workspace.
-            state.space.unmap_elem(&window);
-            let ws_id = state.alloc_workspace_id();
+            state.workspace.active_space.unmap_elem(&window);
+            let ws_id = state.workspace.alloc_id();
             tracing::info!("new Emacs frame → workspace {ws_id}");
 
             // Create workspace first (before computing geometry, because
             // workspace_count() affects bar_height which affects emacs_geometry).
             let emacs_wl = surface.wl_surface().clone();
             let mut new_space = smithay::desktop::Space::default();
-            if let Some(output) = state.space.outputs().next().cloned() {
+            if let Some(output) = state.workspace.active_space.outputs().next().cloned() {
                 new_space.map_output(&output, (0, 0));
             }
 
-            state.inactive_workspaces.insert(
+            state.workspace.inactive.insert(
                 ws_id,
                 Workspace {
                     space: new_space,
@@ -152,7 +153,7 @@ fn process_pending_toplevels(state: &mut EmskinState) {
                 // Map window at bar offset in the new workspace's space.
                 // Emacs sits at the bottom of the stack so future app
                 // toplevels migrate above it naturally.
-                if let Some(ws) = state.inactive_workspaces.get_mut(&ws_id) {
+                if let Some(ws) = state.workspace.inactive.get_mut(&ws_id) {
                     ws.space.map_element(window.clone(), geo.loc, false);
                     ws.space.lower_element(&window);
                 }
@@ -169,7 +170,7 @@ fn process_pending_toplevels(state: &mut EmskinState) {
 }
 
 fn process_workspace_actions(state: &mut EmskinState) {
-    let actions = state.workspace_protocol.take_pending_actions();
+    let actions = state.workspace.protocol.take_pending_actions();
     if actions.is_empty() {
         return;
     }
@@ -181,7 +182,7 @@ fn process_workspace_actions(state: &mut EmskinState) {
                 state.switch_workspace(id);
             }
             WorkspaceAction::Remove(id) => {
-                if id != state.active_workspace_id {
+                if id != state.workspace.active_id {
                     state.destroy_workspace(id);
                     state
                         .ipc
@@ -196,7 +197,8 @@ fn process_workspace_actions(state: &mut EmskinState) {
 fn detect_dead_workspaces(state: &mut EmskinState) {
     // Detect dead Emacs frames in inactive workspaces.
     let dead_ws: Vec<u64> = state
-        .inactive_workspaces
+        .workspace
+        .inactive
         .iter()
         .filter(|(_, ws)| ws.emacs_surface.as_ref().is_none_or(|s| !s.is_alive()))
         .map(|(id, _)| *id)
@@ -214,11 +216,8 @@ fn detect_dead_workspaces(state: &mut EmskinState) {
     }
 
     // Detect active Emacs frame death.
-    if state.detect_emacs
-        && state.emacs_surface.as_ref().is_some_and(|s| !s.is_alive())
-        && state.initial_size_settled
-    {
-        if let Some(&fallback_id) = state.inactive_workspaces.keys().next() {
+    if state.emacs.main_died() {
+        if let Some(&fallback_id) = state.workspace.inactive.keys().next() {
             tracing::info!("active Emacs died, switching to workspace {fallback_id}");
             state.switch_workspace(fallback_id);
             state.needs_redraw = true;
@@ -230,17 +229,18 @@ fn detect_dead_workspaces(state: &mut EmskinState) {
 }
 
 fn refresh_workspace_state(state: &mut EmskinState) {
-    let ws_ids = state.all_workspace_ids();
+    let ws_ids = state.workspace.all_ids();
 
     // Build (id, &name) pairs — borrow from state, no cloning.
     let ws_named: Vec<(u64, &str)> = ws_ids
         .iter()
         .map(|&id| {
-            let name: &str = if id == state.active_workspace_id {
-                &state.active_workspace_name
+            let name: &str = if id == state.workspace.active_id {
+                &state.workspace.active_name
             } else {
                 state
-                    .inactive_workspaces
+                    .workspace
+                    .inactive
                     .get(&id)
                     .map(|ws| ws.name.as_str())
                     .unwrap_or("")
@@ -260,15 +260,15 @@ fn refresh_workspace_state(state: &mut EmskinState) {
             crate::protocols::workspace::WorkspaceInfo {
                 id,
                 name: display_name,
-                active: id == state.active_workspace_id,
+                active: id == state.workspace.active_id,
             }
         })
         .collect();
-    if let Some(output) = state.space.outputs().next().cloned() {
+    if let Some(output) = state.workspace.active_space.outputs().next().cloned() {
         let dh = state.display_handle.clone();
-        state.workspace_protocol.refresh(&dh, &ws_infos, &output);
+        state.workspace.protocol.refresh(&dh, &ws_infos, &output);
     }
-    state.workspace_protocol.cleanup_dead();
+    state.workspace.protocol.cleanup_dead();
 
     // External workspace bar (emskin-bar) consumes ext-workspace-v1 directly;
     // compositor no longer pushes workspace list into an internal overlay.
@@ -282,7 +282,7 @@ fn cleanup_dead_apps(state: &mut EmskinState) {
     }
     state.needs_redraw = true;
     for app in &dead {
-        if let Some(space) = state.space_for_workspace_mut(app.workspace_id) {
+        if let Some(space) = state.workspace.space_for_mut(app.workspace_id) {
             space.unmap_elem(&app.window);
         }
         state.ipc.send(OutgoingMessage::WindowDestroyed {

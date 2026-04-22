@@ -21,8 +21,7 @@ impl SeatHandler for EmskinState {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
-        self.cursor_status = image;
-        self.cursor_changed = true;
+        self.cursor.set_image(image);
         self.needs_redraw = true;
     }
 
@@ -38,39 +37,11 @@ impl SeatHandler for EmskinState {
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
 
-        // Bridge text_input enter/leave — smithay's keyboard handler
-        // gates these behind has_instance() which is always false here.
-        use smithay::wayland::text_input::TextInputSeat;
-        let ti = seat.text_input();
-        let old = self.focus.text_input_focus.take();
-        let new = focused_wl;
-        if old.as_ref() != new.as_ref() {
-            if old.is_some() {
-                ti.set_focus(old);
-                ti.leave();
-            }
-            ti.set_focus(new.clone());
-            if new.is_some() {
-                ti.enter();
-            }
-        }
-        self.focus.text_input_focus = new;
-
-        // Only enable host IME when the focused client has bound text_input_v3.
-        // Apps using their own IM module (fcitx5-gtk via DBus) don't bind it
-        // and need raw keyboard events from wl_keyboard instead.
-        let mut has_ti = false;
-        ti.with_focused_text_input(|_, _| {
-            has_ti = true;
-        });
-        if self.focus.pending_ime_allowed != Some(has_ti) {
-            self.focus.pending_ime_allowed = Some(has_ti);
-        }
+        self.ime.on_focus_changed(seat, focused_wl);
     }
 }
 
 delegate_seat!(EmskinState);
-smithay::delegate_text_input_manager!(EmskinState);
 
 impl smithay::wayland::tablet_manager::TabletSeatHandler for EmskinState {}
 smithay::delegate_cursor_shape!(EmskinState);

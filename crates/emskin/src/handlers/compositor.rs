@@ -42,7 +42,8 @@ impl CompositorHandler for EmskinState {
                 root = parent;
             }
             if let Some(window) = self
-                .space
+                .workspace
+                .active_space
                 .elements()
                 .find(|w| w.wl_surface().map(|s| *s == root).unwrap_or(false))
             {
@@ -60,7 +61,9 @@ impl CompositorHandler for EmskinState {
                 })
             });
             if let Some((window, window_id, geo)) = commit_info {
-                self.space.map_element(window, geo.loc, false);
+                self.workspace
+                    .active_space
+                    .map_element(window, geo.loc, false);
                 tracing::debug!("embedded app window_id={window_id} geometry committed: {geo:?}");
             }
         };
@@ -68,32 +71,33 @@ impl CompositorHandler for EmskinState {
         // Layer surface commit: re-arrange and send pending configure.
         // Keyboard focus is set here (not in new_layer_surface) because
         // cached_state only has keyboard_interactivity after initial commit.
-        let layer_focus = if let Some(output) = self.space.outputs().next().cloned() {
-            let mut map = layer_map_for_output(&output);
-            let layer = map
-                .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
-                .cloned();
-            if let Some(ref layer) = layer {
-                // Capture the non-exclusive zone *before* and *after*
-                // arrange so we only relayout Emacs when the usable area
-                // actually shifts. `arrange()` returns true on any
-                // layout change — including a non-exclusive overlay
-                // (rofi / zofi launcher) simply moving into place,
-                // which must *not* trigger an Emacs resize.
-                let zone_before = map.non_exclusive_zone();
-                map.arrange();
-                let zone_after = map.non_exclusive_zone();
-                drop(map);
-                layer.layer_surface().send_pending_configure();
+        let layer_focus =
+            if let Some(output) = self.workspace.active_space.outputs().next().cloned() {
+                let mut map = layer_map_for_output(&output);
+                let layer = map
+                    .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                    .cloned();
+                if let Some(ref layer) = layer {
+                    // Capture the non-exclusive zone *before* and *after*
+                    // arrange so we only relayout Emacs when the usable area
+                    // actually shifts. `arrange()` returns true on any
+                    // layout change — including a non-exclusive overlay
+                    // (rofi / zofi launcher) simply moving into place,
+                    // which must *not* trigger an Emacs resize.
+                    let zone_before = map.non_exclusive_zone();
+                    map.arrange();
+                    let zone_after = map.non_exclusive_zone();
+                    drop(map);
+                    layer.layer_surface().send_pending_configure();
 
-                let needs_focus = layer.can_receive_keyboard_focus();
-                Some((needs_focus, layer.clone(), zone_before != zone_after))
+                    let needs_focus = layer.can_receive_keyboard_focus();
+                    Some((needs_focus, layer.clone(), zone_before != zone_after))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
         if let Some((needs_focus, layer, zone_changed)) = layer_focus {
             if needs_focus {
                 if let Some(keyboard) = self.seat.get_keyboard() {
@@ -117,19 +121,24 @@ impl CompositorHandler for EmskinState {
             return;
         }
 
-        xdg_shell::handle_surface_commit(&mut self.wl.popups, &self.space, surface);
+        xdg_shell::handle_surface_commit(
+            &mut self.wl.popups,
+            &self.workspace.active_space,
+            surface,
+        );
 
         // Fire frame callbacks for surfaces not tracked in space or layer map
         // (e.g., temporary Vulkan test surfaces created during GPU init).
         // Without this, Vulkan WSI's vkQueuePresentKHR stalls waiting for
         // wl_surface.frame callbacks that never arrive.
         let is_space_element = self
-            .space
+            .workspace
+            .active_space
             .elements()
             .any(|w| w.wl_surface().is_some_and(|s| *s == *surface));
         if !is_space_element {
             tracing::trace!("untracked surface commit: {surface:?}");
-            if let Some(output) = self.space.outputs().next() {
+            if let Some(output) = self.workspace.active_space.outputs().next() {
                 send_frames_surface_tree(
                     surface,
                     output,
