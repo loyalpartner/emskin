@@ -227,7 +227,7 @@ impl XdgShellHandler for EmskinState {
     fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
         if self.is_emacs_surface(&surface) {
             tracing::info!("Emacs requested fullscreen");
-            self.pending_fullscreen = Some(true);
+            self.emacs.request_fullscreen(true);
             Self::set_toplevel_state(&surface, xdg_toplevel::State::Fullscreen, true);
         } else if self.apps.id_for_surface(surface.wl_surface()).is_some() {
             // Embedded app fullscreen: set state so the client hides its
@@ -250,7 +250,7 @@ impl XdgShellHandler for EmskinState {
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         if self.is_emacs_surface(&surface) {
             tracing::info!("Emacs requested maximize");
-            self.pending_maximize = Some(true);
+            self.emacs.request_maximize(true);
             Self::set_toplevel_state(&surface, xdg_toplevel::State::Maximized, true);
         }
     }

@@ -42,7 +42,7 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_title(&title);
     }
 
-    if let Some(fullscreen) = state.pending_fullscreen.take() {
+    if let Some(fullscreen) = state.emacs.take_pending_fullscreen() {
         if fullscreen {
             backend
                 .window()
@@ -52,7 +52,7 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         }
     }
 
-    if let Some(maximize) = state.pending_maximize.take() {
+    if let Some(maximize) = state.emacs.take_pending_maximize() {
         backend.window().set_maximized(maximize);
     }
 
@@ -368,7 +368,7 @@ pub fn init_winit(
         backend
             .window()
             .set_fullscreen(Some(winit_crate::window::Fullscreen::Borderless(None)));
-        state.pending_fullscreen = Some(true);
+        state.emacs.request_fullscreen(true);
     } else {
         backend.window().set_maximized(true);
     }

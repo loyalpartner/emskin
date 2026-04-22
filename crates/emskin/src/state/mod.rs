@@ -5,6 +5,7 @@ pub mod emacs;
 pub mod focus;
 pub mod ime;
 pub mod workspace;
+pub mod xwayland;
 
 // Type re-exports for common shorthands (kept for historical call sites
 // that used `crate::KeyboardFocusTarget` before state/ existed).
@@ -130,11 +131,9 @@ pub struct WaylandState {
     pub popups: PopupManager,
 }
 
-pub struct PendingCommand {
-    pub command: String,
-    pub args: Vec<String>,
-    pub standalone: bool,
-}
+/// Re-export so pre-extraction call sites (main.rs spawning the
+/// `--command` child) keep compiling without qualifying the path.
+pub use xwayland::PendingCommand;
 
 pub struct EmskinState {
     pub start_time: std::time::Instant,
@@ -157,19 +156,17 @@ pub struct EmskinState {
     // Smithay protocol state (grouped for clarity).
     pub wl: WaylandState,
 
-    // XWayland: `xwls` owns the pre-bound X11 sockets and lazily
-    // spawns an external `xwayland-satellite` process on X client
-    // connect. `xdisplay` caches the `:N` number for convenience
-    // (exported as DISPLAY, sent to Emacs via IPC).
-    pub xdisplay: Option<u32>,
-    pub xwls: Option<crate::xwayland_satellite::XwlsIntegration>,
+    /// XWayland supervisor state — display number, xwayland-satellite
+    /// integration handle, and the `--command` deferred-spawn mailbox.
+    pub xwayland: xwayland::XwaylandState,
 
     pub seat: Seat<Self>,
 
     // --- emskin specific ---
     /// Emacs host-process state — main surface, child process, title /
-    /// app_id metadata, detection and size-settle latches. Centralises
-    /// the "first toplevel == Emacs" heuristic.
+    /// app_id metadata, detection and size-settle latches, plus the
+    /// `request_fullscreen` / `request_maximize` mailboxes the Emacs
+    /// toplevel populates via `xdg_toplevel.set_fullscreen` etc.
     pub emacs: emacs::EmacsState,
 
     /// Handle to the spawned emskin-bar process (None = `--bar=none` or the
@@ -178,16 +175,6 @@ pub struct EmskinState {
 
     /// Path to extracted elisp dir (for cleanup on exit).
     pub elisp_dir: Option<std::path::PathBuf>,
-
-    /// Pending fullscreen request to forward to host window.
-    /// Some(true) = request fullscreen, Some(false) = exit fullscreen
-    pub pending_fullscreen: Option<bool>,
-
-    /// Pending maximize request to forward to host window.
-    pub pending_maximize: Option<bool>,
-
-    /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
-    pub pending_command: Option<PendingCommand>,
 
     /// Clipboard/selection routing state.
     pub selection: SelectionState,
@@ -314,8 +301,7 @@ impl EmskinState {
                 relative_pointer_manager_state,
                 popups,
             },
-            xdisplay: None,
-            xwls: None,
+            xwayland: xwayland::XwaylandState::default(),
             seat,
 
             // emskin specific
@@ -324,9 +310,6 @@ impl EmskinState {
             ),
             bar_child: None,
             elisp_dir: None,
-            pending_fullscreen: None,
-            pending_maximize: None,
-            pending_command: None,
             selection: SelectionState::default(),
             focus: FocusState::default(),
             ime,
@@ -746,7 +729,7 @@ impl EmskinState {
 
 impl crate::xwayland_satellite::HasXwls for EmskinState {
     fn xwls_mut(&mut self) -> Option<&mut crate::xwayland_satellite::XwlsIntegration> {
-        self.xwls.as_mut()
+        self.xwayland.integration_mut()
     }
 }
 

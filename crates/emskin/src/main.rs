@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !cli.no_spawn {
-        state.pending_command = Some(state::PendingCommand {
+        state.xwayland.set_pending_command(state::PendingCommand {
             command: cli.command.clone(),
             args: cli.command_args.clone(),
             standalone: cli.standalone,
@@ -287,11 +287,9 @@ fn spawn_child(
         .env("DISPLAY", format!(":{x_display}"))
         // Ensure child apps prefer Wayland even when host is X11.
         .env("XDG_SESSION_TYPE", "wayland")
-        .env("GDK_BACKEND", "wayland,x11")
-        .env("QT_QPA_PLATFORM", "wayland;xcb")
-        .env("SDL_VIDEODRIVER", "wayland")
-        .env("CLUTTER_BACKEND", "wayland")
         .env("XDG_SESSION_DESKTOP", "emskin")
+        // .env("GTK_IM_MODULE","wayland")
+        // .env("QT_IM_MODULE","wayland")
         .spawn()
     {
         Ok(child) => state.emacs.set_child(child),
@@ -455,14 +453,16 @@ fn start_xwayland_satellite(
     };
 
     let (tx, rx) = channel::channel::<ToMain>();
-    state.xwls = Some(XwlsIntegration::new(sockets, spawn_cfg, tx));
+    state
+        .xwayland
+        .set_integration(XwlsIntegration::new(sockets, spawn_cfg, tx));
 
     // Rearm handler: when the spawner thread reports child exit, drain
     // pending connections and re-install the socket watch.
     let rearm_handle = handle.clone();
     if let Err(e) = handle.insert_source(rx, move |event, _, st| {
         if let channel::Event::Msg(ToMain::Rearm) = event {
-            if let Some(x) = st.xwls.as_mut() {
+            if let Some(x) = st.xwayland.integration_mut() {
                 if let Err(e) = x.on_rearm(&rearm_handle) {
                     tracing::warn!("xwayland-satellite rearm failed: {e}");
                 }
@@ -470,27 +470,32 @@ fn start_xwayland_satellite(
         }
     }) {
         tracing::error!("xwayland-satellite: failed to install rearm channel: {e}");
-        state.xwls = None;
+        state.xwayland.clear_integration();
         return;
     }
 
-    if let Err(e) = state.xwls.as_mut().unwrap().arm(&handle) {
+    if let Err(e) = state
+        .xwayland
+        .integration_mut()
+        .expect("set_integration above guarantees Some")
+        .arm(&handle)
+    {
         tracing::error!("xwayland-satellite: arm() failed: {e}");
-        state.xwls = None;
+        state.xwayland.clear_integration();
         return;
     }
 
     // Socket is ready — export DISPLAY and notify Emacs. First X client
     // connect will trigger the on-demand satellite spawn automatically.
     std::env::set_var("DISPLAY", &display_name);
-    state.xdisplay = Some(display);
+    state.xwayland.set_display(display);
     state
         .ipc
         .send(ipc::OutgoingMessage::XWaylandReady { display });
     tracing::info!("xwayland-satellite: socket ready on {display_name}");
 
     // Spawn pending Emacs now that both WAYLAND_DISPLAY and DISPLAY are set.
-    if let Some(pc) = state.pending_command.take() {
+    if let Some(pc) = state.xwayland.take_pending_command() {
         spawn_child(&pc.command, &pc.args, display, pc.standalone, state);
     }
 }

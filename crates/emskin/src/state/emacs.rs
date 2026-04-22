@@ -28,6 +28,14 @@ pub struct EmacsState {
     app_id: Option<String>,
     detect: bool,
     initial_size_settled: bool,
+    /// Deferred `set_fullscreen` request — produced by
+    /// `xdg_toplevel.set_fullscreen` on the Emacs surface, drained by
+    /// `apply_pending_state` on the next render tick. The CLI
+    /// `--fullscreen` startup flag piggybacks on the same mailbox.
+    pending_fullscreen: Option<bool>,
+    /// Deferred `set_maximized` request — mirror of
+    /// `pending_fullscreen` for the maximize toplevel state.
+    pending_maximize: Option<bool>,
 }
 
 impl EmacsState {
@@ -43,6 +51,8 @@ impl EmacsState {
             app_id: None,
             detect,
             initial_size_settled: false,
+            pending_fullscreen: None,
+            pending_maximize: None,
         }
     }
 
@@ -112,6 +122,27 @@ impl EmacsState {
     /// currently write-only.
     pub fn set_app_id(&mut self, app_id: String) {
         self.app_id = Some(app_id);
+    }
+
+    // -- Pending host-window-state requests -------------------------
+
+    /// Request the host winit window enter/leave fullscreen. Drained
+    /// by `apply_pending_state` in the next render tick.
+    pub fn request_fullscreen(&mut self, fullscreen: bool) {
+        self.pending_fullscreen = Some(fullscreen);
+    }
+
+    pub fn take_pending_fullscreen(&mut self) -> Option<bool> {
+        self.pending_fullscreen.take()
+    }
+
+    /// Request the host winit window enter/leave maximize.
+    pub fn request_maximize(&mut self, maximize: bool) {
+        self.pending_maximize = Some(maximize);
+    }
+
+    pub fn take_pending_maximize(&mut self) -> Option<bool> {
+        self.pending_maximize.take()
     }
 
     // -- Lifecycle latches ------------------------------------------
@@ -334,5 +365,75 @@ mod tests {
         let mut e = EmacsState::new(true);
         e.mark_size_settled();
         assert!(!e.main_died());
+    }
+
+    // -- pending_fullscreen / pending_maximize ----------------------
+
+    #[test]
+    fn pending_fullscreen_empty_by_default() {
+        let mut e = EmacsState::new(true);
+        assert!(e.take_pending_fullscreen().is_none());
+    }
+
+    #[test]
+    fn request_fullscreen_true_roundtrips_via_take() {
+        let mut e = EmacsState::new(true);
+        e.request_fullscreen(true);
+        assert_eq!(e.take_pending_fullscreen(), Some(true));
+        assert!(
+            e.take_pending_fullscreen().is_none(),
+            "take drains — a second read returns None"
+        );
+    }
+
+    #[test]
+    fn request_fullscreen_false_roundtrips_via_take() {
+        let mut e = EmacsState::new(true);
+        e.request_fullscreen(false);
+        assert_eq!(e.take_pending_fullscreen(), Some(false));
+    }
+
+    #[test]
+    fn request_fullscreen_overwrites_previous_pending_value() {
+        // If two requests arrive before the render tick drains, the
+        // later one wins — that matches the existing flat-assignment
+        // semantics (`state.pending_fullscreen = Some(true)` etc.).
+        let mut e = EmacsState::new(true);
+        e.request_fullscreen(false);
+        e.request_fullscreen(true);
+        assert_eq!(e.take_pending_fullscreen(), Some(true));
+    }
+
+    #[test]
+    fn pending_maximize_empty_by_default() {
+        let mut e = EmacsState::new(true);
+        assert!(e.take_pending_maximize().is_none());
+    }
+
+    #[test]
+    fn request_maximize_true_roundtrips_via_take() {
+        let mut e = EmacsState::new(true);
+        e.request_maximize(true);
+        assert_eq!(e.take_pending_maximize(), Some(true));
+        assert!(e.take_pending_maximize().is_none());
+    }
+
+    #[test]
+    fn request_maximize_overwrites_previous_pending_value() {
+        let mut e = EmacsState::new(true);
+        e.request_maximize(false);
+        e.request_maximize(true);
+        assert_eq!(e.take_pending_maximize(), Some(true));
+    }
+
+    #[test]
+    fn pending_fullscreen_and_maximize_are_independent() {
+        // Setting one must not drain or contaminate the other.
+        let mut e = EmacsState::new(true);
+        e.request_fullscreen(true);
+        assert!(e.take_pending_maximize().is_none());
+        e.request_maximize(false);
+        assert_eq!(e.take_pending_fullscreen(), Some(true));
+        assert_eq!(e.take_pending_maximize(), Some(false));
     }
 }
