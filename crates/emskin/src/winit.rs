@@ -38,7 +38,7 @@ fn make_mode(size: Size<i32, Physical>) -> Mode {
 }
 
 fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBackend<GlesRenderer>) {
-    if let Some(title) = state.emacs_title.take() {
+    if let Some(title) = state.emacs.take_title() {
         backend.window().set_title(&title);
     }
 
@@ -151,7 +151,7 @@ fn render_frame(
             .unwrap_or_else(|| Rectangle::from_size(output_size_log));
 
         // Edge-detect Emacs connection and trigger `splash.dismiss` once.
-        let emacs_now = state.emacs_surface.is_some();
+        let emacs_now = state.emacs.has_main_surface();
         if emacs_now && !state.effects.last_emacs_connected {
             state.effects.splash.borrow_mut().dismiss();
         }
@@ -436,7 +436,7 @@ pub fn init_winit(
                         map.arrange();
                     }
 
-                    if state.initial_size_settled {
+                    if state.emacs.size_settled() {
                         // Re-lays out every Emacs frame against the fresh
                         // non_exclusive_zone and broadcasts SurfaceSize — also
                         // sets needs_redraw.

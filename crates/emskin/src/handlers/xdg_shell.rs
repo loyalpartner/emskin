@@ -27,11 +27,11 @@ impl XdgShellHandler for EmskinState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        if self.detect_emacs && self.emacs_surface.is_none() && !self.initial_size_settled {
+        if self.emacs.should_claim_main() {
             // First toplevel = Emacs (Wayland/pgtk path only).
             // X11 Emacs sets initial_size_settled in map_window_request.
             tracing::info!("Emacs toplevel connected");
-            self.emacs_surface = Some(surface.wl_surface().clone());
+            self.emacs.set_surface(Some(surface.wl_surface().clone()));
 
             if let Some(output) = self.workspace.active_space.outputs().next() {
                 if let Some(mode) = output.current_mode() {
@@ -47,7 +47,7 @@ impl XdgShellHandler for EmskinState {
                     });
                 }
             }
-            self.initial_size_settled = true;
+            self.emacs.mark_size_settled();
 
             let window = Window::new_wayland_window(surface);
             self.workspace
@@ -267,7 +267,7 @@ impl XdgShellHandler for EmskinState {
             if let Some(title) = title {
                 tracing::debug!("Emacs title changed: {title}");
                 self.workspace.active_name = extract_bar_name(&title);
-                self.emacs_title = Some(title);
+                self.emacs.set_title(title);
             }
         } else if self.is_any_emacs_surface(surface.wl_surface()) {
             // Inactive workspace Emacs frame — update its workspace name.
@@ -298,7 +298,7 @@ impl XdgShellHandler for EmskinState {
                 Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.app_id.clone()));
             if let Some(app_id) = app_id {
                 tracing::debug!("Emacs app_id changed: {}", app_id);
-                self.emacs_app_id = Some(app_id);
+                self.emacs.set_app_id(app_id);
             }
         }
         // Inactive workspace Emacs or other surfaces: ignore app_id changes.
@@ -392,7 +392,7 @@ pub fn handle_surface_commit(
 
 impl EmskinState {
     fn is_emacs_surface(&self, surface: &ToplevelSurface) -> bool {
-        Some(surface.wl_surface()) == self.emacs_surface.as_ref()
+        self.emacs.is_main_surface(surface.wl_surface())
     }
 
     fn set_toplevel_state(surface: &ToplevelSurface, state: xdg_toplevel::State, enabled: bool) {

@@ -1,6 +1,7 @@
 pub mod apps;
 pub mod cursor;
 pub mod effects;
+pub mod emacs;
 pub mod focus;
 pub mod ime;
 pub mod workspace;
@@ -166,23 +167,10 @@ pub struct EmskinState {
     pub seat: Seat<Self>,
 
     // --- emskin specific ---
-    /// The Emacs surface (first toplevel to connect)
-    pub emacs_surface: Option<WlSurface>,
-
-    /// Whether the initial size has been configured.
-    /// Set to true once Emacs receives the host window size in its first configure.
-    /// After this, host Resized events propagate size to Emacs.
-    pub initial_size_settled: bool,
-
-    /// When false, skip the "first toplevel == Emacs" heuristic and the
-    /// "last Emacs frame died → stop" shutdown path. Set from the
-    /// `EMSKIN_DISABLE_EMACS_DETECTION` env var at startup; intended
-    /// for E2E tests that spawn transient Wayland clients (wl-copy,
-    /// xclip, …) without a real Emacs ever attaching.
-    pub detect_emacs: bool,
-
-    /// Handle to the spawned Emacs process
-    pub emacs_child: Option<std::process::Child>,
+    /// Emacs host-process state — main surface, child process, title /
+    /// app_id metadata, detection and size-settle latches. Centralises
+    /// the "first toplevel == Emacs" heuristic.
+    pub emacs: emacs::EmacsState,
 
     /// Handle to the spawned emskin-bar process (None = `--bar=none` or the
     /// binary couldn't be located). Kept alive so it's reaped on shutdown.
@@ -197,12 +185,6 @@ pub struct EmskinState {
 
     /// Pending maximize request to forward to host window.
     pub pending_maximize: Option<bool>,
-
-    /// Emacs window title, forwarded to host toplevel
-    pub emacs_title: Option<String>,
-
-    /// Emacs app_id, forwarded to host toplevel
-    pub emacs_app_id: Option<String>,
 
     /// Child command to spawn once XWayland is ready (None = already spawned or --no-spawn).
     pub pending_command: Option<PendingCommand>,
@@ -337,16 +319,13 @@ impl EmskinState {
             seat,
 
             // emskin specific
-            emacs_surface: None,
-            initial_size_settled: false,
-            detect_emacs: std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
-            emacs_child: None,
+            emacs: emacs::EmacsState::new(
+                std::env::var_os("EMSKIN_DISABLE_EMACS_DETECTION").is_none(),
+            ),
             bar_child: None,
             elisp_dir: None,
             pending_fullscreen: None,
             pending_maximize: None,
-            emacs_title: None,
-            emacs_app_id: None,
             pending_command: None,
             selection: SelectionState::default(),
             focus: FocusState::default(),
@@ -461,7 +440,7 @@ impl EmskinState {
     /// including gtk3 Emacs over XWayland — presents as a Wayland
     /// toplevel, so there is no separate X11 branch.
     pub fn emacs_window(&self) -> Option<Window> {
-        let surface = self.emacs_surface.as_ref()?;
+        let surface = self.emacs.surface()?;
         self.workspace
             .active_space
             .elements()
@@ -561,14 +540,14 @@ impl EmskinState {
 
     /// Check if a surface belongs to the same Wayland client as the active Emacs.
     pub fn is_emacs_client(&self, surface: &WlSurface) -> bool {
-        self.emacs_surface
-            .as_ref()
+        self.emacs
+            .surface()
             .is_some_and(|emacs| emacs.same_client_as(&surface.id()))
     }
 
     /// Check if a surface is any workspace's Emacs surface (active or inactive).
     pub fn is_any_emacs_surface(&self, surface: &WlSurface) -> bool {
-        if self.emacs_surface.as_ref() == Some(surface) {
+        if self.emacs.is_main_surface(surface) {
             return true;
         }
         self.workspace
@@ -589,7 +568,7 @@ impl EmskinState {
 
         // Swap: current active → inactive, target → active.
         let old_space = std::mem::take(&mut self.workspace.active_space);
-        let old_emacs = self.emacs_surface.take();
+        let old_emacs = self.emacs.take_surface();
         let old_name = std::mem::take(&mut self.workspace.active_name);
         self.workspace.inactive.insert(
             self.workspace.active_id,
@@ -601,7 +580,7 @@ impl EmskinState {
         );
 
         self.workspace.active_space = target.space;
-        self.emacs_surface = target.emacs_surface.take();
+        self.emacs.set_surface(target.emacs_surface.take());
         self.workspace.active_name = target.name;
         self.workspace.active_id = target_id;
 
@@ -789,7 +768,7 @@ impl EmskinState {
         );
 
         // Active workspace's Emacs surface lives in self.workspace.active_space.
-        let active_emacs = self.emacs_surface.clone();
+        let active_emacs = self.emacs.surface().cloned();
         resize_emacs_in_space(&mut self.workspace.active_space, &active_emacs, geo);
 
         // Inactive workspaces each hold their own space + Emacs.

@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(None, &mut state, emskin::tick::event_loop_tick)?;
 
     // Clean up Emacs child process
-    if let Some(mut child) = state.emacs_child.take() {
+    if let Some(mut child) = state.emacs.take_child() {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -294,7 +294,7 @@ fn spawn_child(
         .env("XDG_SESSION_DESKTOP", "emskin")
         .spawn()
     {
-        Ok(child) => state.emacs_child = Some(child),
+        Ok(child) => state.emacs.set_child(child),
         Err(e) => tracing::error!("Failed to spawn '{command}': {e}"),
     }
 }

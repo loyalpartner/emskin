@@ -10,7 +10,7 @@ use crate::workspace::Workspace;
 /// IPC dispatch, clipboard events, and pending geometry timeouts.
 pub fn event_loop_tick(state: &mut EmskinState) {
     // --- Check if Emacs child process has exited ---
-    if let Some(ref mut child) = state.emacs_child {
+    if let Some(child) = state.emacs.child_mut() {
         if let Ok(Some(status)) = child.try_wait() {
             tracing::info!("Emacs exited with {status}, stopping compositor");
             state.loop_signal.stop();
@@ -216,10 +216,7 @@ fn detect_dead_workspaces(state: &mut EmskinState) {
     }
 
     // Detect active Emacs frame death.
-    if state.detect_emacs
-        && state.emacs_surface.as_ref().is_some_and(|s| !s.is_alive())
-        && state.initial_size_settled
-    {
+    if state.emacs.main_died() {
         if let Some(&fallback_id) = state.workspace.inactive.keys().next() {
             tracing::info!("active Emacs died, switching to workspace {fallback_id}");
             state.switch_workspace(fallback_id);
