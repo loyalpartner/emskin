@@ -120,6 +120,18 @@ struct Connection {
     /// method_returns / signals on this connection. Starts at 1 (DBus
     /// requires non-zero serials).
     serial_counter: u32,
+    /// Best-guess unique name for fcitx5 as the client knows it,
+    /// captured from the `destination` field of intercepted fcitx5
+    /// method_calls. DBus clients normally call `GetNameOwner` once
+    /// to resolve `org.fcitx.Fcitx5 → :1.N` and then use the unique
+    /// name as destination for efficiency, so by the time we see
+    /// method_calls like `InputContext1.FocusIn`, this field is
+    /// populated. Used as the `sender` of broker-synthesized signals
+    /// (`CommitString`, `UpdateFormattedPreedit`) — GDBus and friends
+    /// filter received signals against the unique name their match
+    /// rule's `sender=` clause resolves to, so getting this right is
+    /// what makes commits actually reach the client.
+    fcitx_server_name: Option<String>,
 }
 
 /// The in-process broker. Holds the listener, the upstream bus path for
@@ -224,6 +236,7 @@ impl DbusBroker {
                 upstream_out: VecDeque::new(),
                 ic_registry: IcRegistry::new(),
                 serial_counter: 0,
+                fcitx_server_name: None,
             },
         );
 
@@ -304,6 +317,7 @@ impl DbusBroker {
                 member = msg.header.member.as_deref().unwrap_or(""),
                 interface = msg.header.interface.as_deref().unwrap_or(""),
                 signature = msg.header.signature.as_deref().unwrap_or(""),
+                destination = msg.header.destination.as_deref().unwrap_or(""),
                 body_len = msg.header.body_len,
                 "client → bus message"
             );
@@ -313,6 +327,21 @@ impl DbusBroker {
             let body = &msg_bytes[body_start_in_msg..];
 
             if let Some(fm) = fcitx::classify(&msg.header, body) {
+                // Capture the destination the client used. After the
+                // client has resolved `org.fcitx.Fcitx5` via
+                // GetNameOwner it'll typically send subsequent calls
+                // to the resolved unique name (`:N.M` format); that's
+                // what we want as the sender of our signals.
+                if let Some(dest) = msg.header.destination.as_deref() {
+                    if dest.starts_with(':') && conn.fcitx_server_name.as_deref() != Some(dest) {
+                        tracing::debug!(
+                            ?id,
+                            dest,
+                            "captured fcitx5 unique name for signal sender"
+                        );
+                        conn.fcitx_server_name = Some(dest.to_string());
+                    }
+                }
                 // Intercept.
                 let reply = fcitx::build_reply(
                     &msg.header,
@@ -432,17 +461,18 @@ impl DbusBroker {
             return Ok(());
         };
         let serial = next_nonzero(&mut c.serial_counter);
+        let sender = c.fcitx_server_name.as_deref().unwrap_or(SIGNAL_SENDER);
         let bytes = Signal {
             our_serial: serial,
             path: ic_path,
             interface: INPUT_CONTEXT_IFACE,
             member: "CommitString",
             destination: None,
-            sender: Some(SIGNAL_SENDER),
+            sender: Some(sender),
             body: body_string(text),
         }
         .encode();
-        tracing::info!(?conn, ic_path, text, "emit CommitString signal");
+        tracing::info!(?conn, ic_path, text, sender, "emit CommitString signal");
         c.client_out.extend(bytes);
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
@@ -462,17 +492,18 @@ impl DbusBroker {
             return Ok(());
         };
         let serial = next_nonzero(&mut c.serial_counter);
+        let sender = c.fcitx_server_name.as_deref().unwrap_or(SIGNAL_SENDER);
         let bytes = Signal {
             our_serial: serial,
             path: ic_path,
             interface: INPUT_CONTEXT_IFACE,
             member: "UpdateFormattedPreedit",
             destination: None,
-            sender: Some(SIGNAL_SENDER),
+            sender: Some(sender),
             body: body_preedit(text, cursor.unwrap_or(-1)),
         }
         .encode();
-        tracing::info!(?conn, ic_path, text, "emit UpdateFormattedPreedit signal");
+        tracing::info!(?conn, ic_path, text, sender, "emit UpdateFormattedPreedit signal");
         c.client_out.extend(bytes);
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
