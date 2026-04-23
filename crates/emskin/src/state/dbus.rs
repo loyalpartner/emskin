@@ -58,39 +58,21 @@ impl DbusBridge {
         let listen_path = session_dir.join("bus.sock");
         let ctl_path = session_dir.join("ctl.sock");
 
-        // Redirect the proxy's stdout/stderr into a session-local log file
-        // instead of the parent's pipes. File fds don't block pipe readers
-        // (test harnesses, `cmd | tail` wrappers) when the proxy outlives
-        // its parent briefly before PDEATHSIG, and we keep the tracing
-        // output for debugging. The log is recreated each run so it doesn't
-        // grow unbounded across emskin restarts.
-        let log_path = session_dir.join("proxy.log");
-        let stdout_target = match std::fs::File::create(&log_path) {
-            Ok(f) => match f.try_clone() {
-                Ok(clone) => Some((f, clone)),
-                Err(e) => {
-                    tracing::warn!(error = %e, ?log_path, "clone proxy log fd failed; logs disabled");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, ?log_path, "create proxy log file failed; logs disabled");
-                None
-            }
-        };
+        // Detach stdio: file-less so the proxy never keeps an inherited
+        // pipe open past the parent's lifetime. Tracing output instead goes
+        // through `EMSKIN_DBUS_LOG_DIR` below — the proxy writes to a log
+        // file there via `tracing_subscriber::with_writer`, which is a plain
+        // fs file fd (doesn't block `cmd | tail`-style wrappers).
+        let log_dir = emskin_log_dir();
         let mut cmd = Command::new(&binary);
         cmd.env("EMSKIN_DBUS_PROXY_LISTEN", &listen_path)
             .env("EMSKIN_DBUS_PROXY_CTL", &ctl_path)
             .env("DBUS_SESSION_BUS_ADDRESS", &upstream_bus)
-            .stdin(Stdio::null());
-        match stdout_target {
-            Some((stdout_file, stderr_file)) => {
-                cmd.stdout(Stdio::from(stdout_file))
-                    .stderr(Stdio::from(stderr_file));
-            }
-            None => {
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(dir) = &log_dir {
+            cmd.env("EMSKIN_DBUS_LOG_DIR", dir);
         }
         // Linux-only safety net: when the parent dies (SIGKILL from a test
         // harness, oom-kill, etc.) the kernel delivers SIGTERM to us so the
@@ -142,7 +124,7 @@ impl DbusBridge {
         tracing::info!(
             ?listen_path,
             ?ctl_path,
-            ?log_path,
+            ?log_dir,
             upstream = %upstream_bus,
             "emskin-dbus-proxy spawned; bus injected into children"
         );
@@ -225,6 +207,25 @@ fn create_session_dir() -> Option<PathBuf> {
         return None;
     }
     Some(dir)
+}
+
+/// Log dir shared with the rest of emskin — `$XDG_RUNTIME_DIR/emskin-<pid>/logs`.
+/// Matches the convention already used by `extract_embedded` for elisp/demo.
+/// Returns `None` if the dir cannot be created; the caller should then skip
+/// the `EMSKIN_DBUS_LOG_DIR` env var so the proxy logs to its stderr (which
+/// is `Stdio::null`).
+fn emskin_log_dir() -> Option<PathBuf> {
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    let dir = runtime_dir
+        .join(format!("emskin-{}", std::process::id()))
+        .join("logs");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            tracing::warn!(error = %e, ?dir, "failed to create emskin log dir");
+            None
+        }
+    }
 }
 
 /// Locate `emskin-dbus-proxy`: sibling of the current binary first (matches

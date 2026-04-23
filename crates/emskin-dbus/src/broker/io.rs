@@ -183,7 +183,7 @@ fn drive_client_to_bus(
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
 
         for msg in &out.messages {
-            tracing::debug!(
+            tracing::info!(
                 member = msg.header.member.as_deref().unwrap_or(""),
                 interface = msg.header.interface.as_deref().unwrap_or(""),
                 signature = msg.header.signature.as_deref().unwrap_or(""),
@@ -290,7 +290,7 @@ mod tests {
     fn build_set_cursor_rect(serial: u32, coords: (i32, i32, i32, i32)) -> Vec<u8> {
         let mut fields = Vec::new();
         push_string_field(&mut fields, 1, "o", "/a");
-        push_string_field(&mut fields, 2, "s", "org.fcitx.Fcitx5.InputContext1");
+        push_string_field(&mut fields, 2, "s", "org.fcitx.Fcitx.InputContext1");
         push_string_field(&mut fields, 3, "s", "SetCursorRect");
         push_string_field(&mut fields, 6, "s", "org.fcitx.Fcitx5");
         push_signature_field(&mut fields, 8, "iiii");

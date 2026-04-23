@@ -28,7 +28,9 @@ use emskin_dbus::broker::io::{BrokerServer, SharedOffset};
 use emskin_dbus::ctl::server as ctl_server;
 
 fn main() -> io::Result<()> {
-    init_tracing();
+    // Tracing guard must live for the whole process: dropping it flushes
+    // the background writer thread. Bind it to a `_guard` scoped to `main`.
+    let _guard = init_tracing();
 
     let listen_path = env_path("EMSKIN_DBUS_PROXY_LISTEN")?;
     let ctl_path = env_path("EMSKIN_DBUS_PROXY_CTL")?;
@@ -70,10 +72,40 @@ fn main() -> io::Result<()> {
     server.run()
 }
 
-fn init_tracing() {
+/// Initialize tracing, returning an optional [`tracing_appender::non_blocking::WorkerGuard`]
+/// when a file appender is in use. The caller must hold the guard for the
+/// full process lifetime — dropping it flushes the background writer and
+/// joins its thread, which is how we make sure the tail of the log survives
+/// a graceful shutdown.
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let filter = tracing_subscriber::EnvFilter::try_from_env("EMSKIN_DBUS_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // When emskin sets `EMSKIN_DBUS_LOG_DIR`, stream tracing output into a
+    // file inside that directory via `tracing_appender`. Parent detaches
+    // our stdio to `/dev/null`, so without this redirect the logs would go
+    // nowhere.
+    if let Some(dir) = std::env::var_os("EMSKIN_DBUS_LOG_DIR") {
+        let dir = PathBuf::from(dir);
+        // Recreate the log file on every run so an emskin restart always
+        // starts from an empty file — `rolling::never` opens in append
+        // mode, so without this step stale lines from the prior session
+        // would pile up.
+        let path = dir.join("emskin-dbus-proxy.log");
+        let _ = std::fs::remove_file(&path);
+
+        let file_appender = tracing_appender::rolling::never(&dir, "emskin-dbus-proxy.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(non_blocking)
+            .init();
+        return Some(guard);
+    }
+
     tracing_subscriber::fmt().with_env_filter(filter).init();
+    None
 }
 
 fn env_path(key: &str) -> io::Result<PathBuf> {

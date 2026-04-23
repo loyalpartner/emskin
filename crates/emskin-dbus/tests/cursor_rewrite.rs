@@ -55,7 +55,7 @@ fn set_cursor_rect_call(serial: u32, body_coords: (i32, i32, i32, i32)) -> Vec<u
         "o",
         "/org/freedesktop/portal/inputcontext/1",
     );
-    push_string_field(&mut fields, 2, "s", "org.fcitx.Fcitx5.InputContext1");
+    push_string_field(&mut fields, 2, "s", "org.fcitx.Fcitx.InputContext1");
     push_string_field(&mut fields, 3, "s", "SetCursorRect");
     push_string_field(&mut fields, 6, "s", "org.fcitx.Fcitx5");
     push_signature_field(&mut fields, 8, "iiii");

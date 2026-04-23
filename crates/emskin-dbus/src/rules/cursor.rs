@@ -15,11 +15,13 @@
 //!
 //! | Interface | Member | Signature | Notes |
 //! |---|---|---|---|
-//! | `org.fcitx.Fcitx5.InputContext1` | `SetCursorRect` | `iiii` | fcitx5 (Wayland/portal) |
-//! | `org.fcitx.Fcitx.InputContext`   | `SetCursorLocation` | `ii` | fcitx4 legacy |
+//! | `org.fcitx.Fcitx.InputContext1` | `SetCursorRectV2` | `iiiid` | fcitx5 modern (x, y, w, h, scale) |
+//! | `org.fcitx.Fcitx.InputContext1` | `SetCursorRect` | `iiii` | fcitx5 legacy |
+//! | `org.fcitx.Fcitx.InputContext`  | `SetCursorLocation` | `ii` | fcitx4 legacy |
 //!
-//! Only the first two `i32`s (x, y) are modified; any trailing `(w, h)` are
-//! left untouched — width/height are offset-invariant.
+//! Only the first two `i32`s (x, y) are modified; any trailing `(w, h)` or
+//! `(w, h, scale)` are left untouched — width/height/scale are all
+//! offset-invariant.
 //!
 //! Integer overflow on the add saturates. A clamped caret is a better
 //! failure mode than wrapping around to the other side of the screen.
@@ -30,9 +32,13 @@ use crate::dbus::message::{Endian, Header};
 /// caller can decide what size body to expect before mutating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorMethod {
-    /// fcitx5 `SetCursorRect(x: i32, y: i32, w: i32, h: i32)`.
+    /// fcitx5 modern: `SetCursorRectV2(x:i32, y:i32, w:i32, h:i32, scale:f64)`.
+    /// The default method Qt5+/GTK3+ IM modules use once fcitx5-qt /
+    /// fcitx5-gtk are modern enough.
+    SetCursorRectV2,
+    /// fcitx5 legacy: `SetCursorRect(x:i32, y:i32, w:i32, h:i32)`.
     SetCursorRect,
-    /// fcitx4 `SetCursorLocation(x: i32, y: i32)`.
+    /// fcitx4: `SetCursorLocation(x:i32, y:i32)`.
     SetCursorLocation,
 }
 
@@ -40,13 +46,17 @@ impl CursorMethod {
     /// Minimum body size in bytes the method expects.
     pub const fn expected_body_len(self) -> usize {
         match self {
-            Self::SetCursorRect => 16,
-            Self::SetCursorLocation => 8,
+            Self::SetCursorRectV2 => 24, // iiii + double
+            Self::SetCursorRect => 16,   // iiii
+            Self::SetCursorLocation => 8, // ii
         }
     }
 }
 
-const FCITX5_INPUT_CONTEXT_IFACE: &str = "org.fcitx.Fcitx5.InputContext1";
+/// Interface used by fcitx5 for both `SetCursorRect` and `SetCursorRectV2`.
+/// Note: fcitx5's object path looks like ``.Fcitx5.InputContext1`` but the
+/// DBus *interface* name is historical and drops the ``5``.
+const FCITX5_INPUT_CONTEXT_IFACE: &str = "org.fcitx.Fcitx.InputContext1";
 const FCITX4_INPUT_CONTEXT_IFACE: &str = "org.fcitx.Fcitx.InputContext";
 
 /// If this method_call is one of the recognized cursor-coordinate methods,
@@ -60,6 +70,9 @@ pub fn classify(header: &Header) -> Option<CursorMethod> {
     let sig = header.signature.as_deref()?;
 
     match (iface, member, sig) {
+        (FCITX5_INPUT_CONTEXT_IFACE, "SetCursorRectV2", "iiiid") => {
+            Some(CursorMethod::SetCursorRectV2)
+        }
         (FCITX5_INPUT_CONTEXT_IFACE, "SetCursorRect", "iiii") => Some(CursorMethod::SetCursorRect),
         (FCITX4_INPUT_CONTEXT_IFACE, "SetCursorLocation", "ii") => {
             Some(CursorMethod::SetCursorLocation)
@@ -156,6 +169,12 @@ mod tests {
     // ---------------------------------------------------------------------
 
     #[test]
+    fn classifies_fcitx5_set_cursor_rect_v2() {
+        let h = hdr(FCITX5_INPUT_CONTEXT_IFACE, "SetCursorRectV2", Some("iiiid"));
+        assert_eq!(classify(&h), Some(CursorMethod::SetCursorRectV2));
+    }
+
+    #[test]
     fn classifies_fcitx5_set_cursor_rect() {
         let h = hdr(FCITX5_INPUT_CONTEXT_IFACE, "SetCursorRect", Some("iiii"));
         assert_eq!(classify(&h), Some(CursorMethod::SetCursorRect));
@@ -228,6 +247,51 @@ mod tests {
         // w and h untouched
         assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 10);
         assert_eq!(i32::from_le_bytes(body[12..16].try_into().unwrap()), 20);
+    }
+
+    #[test]
+    fn set_cursor_rect_v2_translates_xy_and_preserves_scale() {
+        // iiii + double(f64) = 16 + 8 = 24 bytes.
+        let scale_bytes = 1.25f64.to_le_bytes();
+        let mut body = Vec::new();
+        body.extend_from_slice(&le_i32s(&[100, 200, 10, 20]));
+        body.extend_from_slice(&scale_bytes);
+        assert_eq!(body.len(), 24);
+
+        apply_offset(
+            CursorMethod::SetCursorRectV2,
+            Endian::Little,
+            &mut body,
+            (5, 7),
+        )
+        .unwrap();
+
+        assert_eq!(i32::from_le_bytes(body[0..4].try_into().unwrap()), 105);
+        assert_eq!(i32::from_le_bytes(body[4..8].try_into().unwrap()), 207);
+        // w, h, and scale (the trailing f64) all untouched.
+        assert_eq!(i32::from_le_bytes(body[8..12].try_into().unwrap()), 10);
+        assert_eq!(i32::from_le_bytes(body[12..16].try_into().unwrap()), 20);
+        assert_eq!(&body[16..24], &scale_bytes);
+    }
+
+    #[test]
+    fn set_cursor_rect_v2_rejects_short_body() {
+        // A 16-byte iiii body is *not* enough for V2 (needs 24 = iiii + f64).
+        let mut body = le_i32s(&[0, 0, 0, 0]);
+        let err = apply_offset(
+            CursorMethod::SetCursorRectV2,
+            Endian::Little,
+            &mut body,
+            (0, 0),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RewriteError::BodyTooShort {
+                got: 16,
+                expected: 24
+            }
+        );
     }
 
     #[test]
