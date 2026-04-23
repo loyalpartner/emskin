@@ -101,6 +101,26 @@ pub fn event_loop_tick(state: &mut EmskinState) {
         }
         tracing::debug!("embedded app window_id={window_id} geometry force-committed (timeout)");
     }
+
+    // --- Re-evaluate host IME after this tick's Wayland traffic ---
+    // smithay does not expose a callback when a client late-binds or
+    // destroys a `text_input_v3` instance. The decision "should host
+    // IME be allowed?" is a function of (focused surface, focused
+    // client's bound text_input instances) — both of which can change
+    // between focus_changed events.
+    //
+    // Concretely: pgtk Emacs binds text_input *after* its initial
+    // configure, i.e. after the `new_toplevel` keyboard-focus event
+    // fires. The original `on_focus_changed` evaluation gave `false`
+    // because the bind hadn't happened yet, and the answer never got
+    // re-evaluated until the user cycled focus through another app.
+    //
+    // Resync once per tick (after dispatch_clients has processed any
+    // bind/destroy in this batch). Cost is a single uncontested mutex
+    // lock + a tiny instance-list scan; the mailbox is only written
+    // when the answer differs from `last_committed`, so steady state
+    // is silent.
+    state.ime.resync(&state.seat);
 }
 
 fn process_pending_toplevels(state: &mut EmskinState) {
