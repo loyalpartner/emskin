@@ -5,7 +5,7 @@
 //! or the broker fails to bind its listen socket, the bridge stays inert
 //! and the compositor keeps running — embedded IME popups fall back to
 //! hitting the host session bus directly (same as pre-PR behavior), just
-//! without the cursor-coord rewrite. No regression.
+//! without the fcitx5 frontend interception. No regression.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,9 +30,6 @@ pub struct DbusBridge {
     pub listen_path: Option<PathBuf>,
     /// Runtime session dir we own; cleaned up on shutdown.
     pub session_dir: Option<PathBuf>,
-    /// Last rect we fed into `broker.set_offset`. Used for diffing so
-    /// the tick reconciler is a cheap no-op on unchanged focus.
-    last_rect: Option<[i32; 4]>,
     /// Calloop `RegistrationToken`s for every active connection's
     /// (client → upstream, upstream → client) source pair. Owned here
     /// rather than on [`DbusBroker`] so that the broker stays
@@ -47,7 +44,6 @@ impl std::fmt::Debug for DbusBridge {
             .field("broker", &self.broker.is_some())
             .field("listen_path", &self.listen_path)
             .field("session_dir", &self.session_dir)
-            .field("last_rect", &self.last_rect)
             .finish()
     }
 }
@@ -97,7 +93,6 @@ impl DbusBridge {
             broker: Some(broker),
             listen_path: Some(listen_path),
             session_dir: Some(session_dir),
-            last_rect: None,
             connection_tokens: HashMap::new(),
         }
     }
@@ -112,34 +107,6 @@ impl DbusBridge {
                 format!("unix:path={}", path.display()),
             );
         }
-    }
-
-    /// Push a focus rect, but only if it changed since the last call.
-    /// `rect[0..2]` becomes the cursor-rewrite offset; `rect[2..4]`
-    /// (w, h) is currently ignored — kept in the signature for symmetry
-    /// with the prior ctl protocol and so future M2-M5 work can use the
-    /// full rectangle without changing the caller.
-    pub fn push_rect(&mut self, rect: [i32; 4]) {
-        if self.last_rect == Some(rect) {
-            return;
-        }
-        let Some(broker) = self.broker.as_mut() else {
-            return;
-        };
-        broker.set_offset(Some((rect[0], rect[1])));
-        self.last_rect = Some(rect);
-    }
-
-    /// Clear the offset. Only acts if we had previously pushed a rect.
-    pub fn push_cleared(&mut self) {
-        if self.last_rect.is_none() {
-            return;
-        }
-        let Some(broker) = self.broker.as_mut() else {
-            return;
-        };
-        broker.set_offset(None);
-        self.last_rect = None;
     }
 
     /// Drop the broker (closes all sockets) and remove the session dir.
@@ -199,13 +166,6 @@ mod tests {
         bridge.inject_env(&mut cmd);
         let dbg = format!("{cmd:?}");
         assert!(dbg.contains("unix:path=/run/user/1000/emskin-dbus-42/bus.sock"));
-    }
-
-    #[test]
-    fn push_rect_without_broker_is_noop() {
-        let mut bridge = DbusBridge::default();
-        bridge.push_rect([10, 20, 0, 0]);
-        assert_eq!(bridge.last_rect, None);
     }
 
     #[test]

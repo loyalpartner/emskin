@@ -103,20 +103,9 @@ pub fn event_loop_tick(state: &mut EmskinState) {
         tracing::debug!("embedded app window_id={window_id} geometry force-committed (timeout)");
     }
 
-    // --- DBus focus reconciliation ---
-    // Push the focused embedded app's emskin-space origin to the
-    // broker so legacy SetCursorRect rewrites (dormant once fcitx5
-    // interception is on) have a valid offset, and drain any fcitx5
-    // events the broker observed this tick to drive winit IME.
-    reconcile_dbus_focus(state);
+    // Drain broker-observed fcitx5 events and drive winit IME in
+    // emskin-winit-local coords.
     drain_fcitx_events(state);
-}
-
-fn reconcile_dbus_focus(state: &mut EmskinState) {
-    match focused_app_rect(state) {
-        Some(rect) => state.dbus.push_rect(rect),
-        None => state.dbus.push_cleared(),
-    }
 }
 
 /// Drain broker-observed fcitx5 events and hand them to the IME
@@ -131,13 +120,24 @@ fn drain_fcitx_events(state: &mut EmskinState) {
     if events.is_empty() {
         return;
     }
-    let origin = focused_app_rect(state).map(|r| [r[0], r[1]]);
+    let origin = focused_app_origin(state);
     for event in events {
         state.ime.on_fcitx_event(event, origin);
     }
 }
 
-fn focused_app_rect(state: &EmskinState) -> Option<[i32; 4]> {
+/// Emskin-space origin of the app whose DBus fcitx5 IC is currently
+/// active. Added to the client-reported caret rect to translate it
+/// into emskin-winit-local coordinates before we hand it to winit IME.
+///
+/// - Emacs main surface: origin is `(0, 0)` — Emacs's wl_surface IS
+///   the emskin winit window, so its surface-local caret coords are
+///   already emskin-winit-local.
+/// - Embedded app (xwayland-satellite or Wayland native): origin is
+///   the buffer top-left inside the emskin Space. Subtracts
+///   `geometry().loc` to back out any CSD shadow padding, matching
+///   the convention in `Space::render_location`.
+fn focused_app_origin(state: &EmskinState) -> Option<[i32; 2]> {
     let kb = state.seat.get_keyboard()?;
     let focus = kb.current_focus()?;
     let window = match focus {
@@ -145,24 +145,12 @@ fn focused_app_rect(state: &EmskinState) -> Option<[i32; 4]> {
         _ => return None,
     };
     let surface = window.wl_surface()?;
-    // Emacs as main surface: its wl_surface IS the emskin winit window,
-    // so any caret coordinate Emacs reports via DBus fcitx5 is already
-    // in emskin-winit-local space. Origin is just (0, 0). This used to
-    // early-return `None` back when the IME plan was "Emacs uses
-    // text_input_v3 directly, not DBus" — B1 (interception in the
-    // broker) changed that; Emacs's DBus fcitx5 calls now flow through
-    // us like any other client's.
     if state.emacs.is_main_surface(&surface) {
-        return Some([0, 0, 0, 0]);
+        return Some([0, 0]);
     }
-    // Visible top-left of the window's buffer in space coords. DBus clients
-    // report caret coordinates relative to the buffer origin (wl_surface
-    // local, which includes any CSD shadow), so we match that frame by
-    // subtracting the `geometry().loc` CSD offset from the element
-    // location, same convention as `Space::render_location`.
     let loc = state.workspace.active_space.element_location(&window)?;
     let geo_offset = window.geometry().loc;
-    Some([loc.x - geo_offset.x, loc.y - geo_offset.y, 0, 0])
+    Some([loc.x - geo_offset.x, loc.y - geo_offset.y])
 }
 
 fn process_pending_toplevels(state: &mut EmskinState) {

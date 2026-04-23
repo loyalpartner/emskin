@@ -34,7 +34,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use emskin_dbus::broker::{apply_cursor_rewrites, state::ConnectionState};
+use emskin_dbus::broker::state::ConnectionState;
 use emskin_dbus::dbus::encode::{body_preedit, body_string, Signal};
 use emskin_dbus::dbus::message::{bytes_needed, parse_header, Endian, MessageType};
 use emskin_dbus::fcitx::{self, reply::next_nonzero, FcitxMethod, IcRegistry, INPUT_CONTEXT_IFACE};
@@ -151,14 +151,12 @@ struct Connection {
     pending_name_lookups: HashMap<u32, String>,
 }
 
-/// The in-process broker. Holds the listener, the upstream bus path for
-/// per-connection dials, the shared focus-origin offset, and all active
-/// connection state.
+/// The in-process broker. Holds the listener, the upstream bus path
+/// for per-connection dials, and all active connection state.
 pub struct DbusBroker {
     listen_path: PathBuf,
     listener: UnixListener,
     upstream_path: PathBuf,
-    offset: Option<(i32, i32)>,
     connections: HashMap<ConnId, Connection>,
     next_id: u64,
     /// Queued fcitx5-observation events (FocusChanged, CursorRect,
@@ -183,7 +181,6 @@ impl DbusBroker {
             listen_path,
             listener,
             upstream_path: upstream,
-            offset: None,
             connections: HashMap::new(),
             next_id: 1,
             events: Vec::new(),
@@ -196,17 +193,6 @@ impl DbusBroker {
 
     pub fn listener_fd(&self) -> RawFd {
         self.listener.as_raw_fd()
-    }
-
-    /// Current cursor-rewrite offset. `None` = pass-through.
-    pub fn offset(&self) -> Option<(i32, i32)> {
-        self.offset
-    }
-
-    /// Update the cursor-rewrite offset. Called from the tick's focus
-    /// reconciler. `None` disables rewrite.
-    pub fn set_offset(&mut self, off: Option<(i32, i32)>) {
-        self.offset = off;
     }
 
     /// Accept one pending connection, dial upstream, register state.
@@ -269,33 +255,28 @@ impl DbusBroker {
 
     /// Client → upstream pump. Reads all readable bytes from the client,
     /// feeds them through the DBus state machine, and for each
-    /// observed message decides between three dispositions:
+    /// observed message decides:
     ///
-    /// 1. **Intercept** (fcitx5 method_calls) — build a synthetic
-    ///    `method_return` via `fcitx::build_reply`, enqueue to
-    ///    `client_out`, emit a typed [`FcitxEvent`] for emskin to
-    ///    consume, and **don't** forward the bytes to upstream.
-    /// 2. **Rewrite-and-forward** — for non-intercepted messages with
-    ///    a cursor-rewrite offset active, apply the offset in place.
-    ///    (Mostly legacy / defensive — once interception is on every
-    ///    SetCursorRect is Intercept'd, but we keep the codepath for
-    ///    a clean fallback if the classifier ever returns `None` for
-    ///    a message that still needs the old offset treatment.)
-    /// 3. **Forward verbatim** — every other message.
+    /// - **Intercept** (fcitx5 method_calls) — build a synthetic
+    ///   `method_return` via [`fcitx::build_reply`], enqueue to
+    ///   `client_out`, emit a typed [`FcitxEvent`] for emskin to
+    ///   consume, and **don't** forward the bytes to upstream.
+    /// - **Track** (`GetNameOwner` for fcitx5 well-knowns) — record
+    ///   the request serial so the matching upstream reply can be
+    ///   matched and the fcitx5 unique name extracted for signal
+    ///   emission. Still forwarded.
+    /// - **Forward verbatim** — every other message.
     pub fn pump_client_to_upstream(&mut self, id: ConnId) -> io::Result<PumpOutcome> {
         // Split-borrow so we can touch `self.events` while `conn` is
-        // live. `offset` is `Option<(i32,i32)>` which is Copy so no
-        // borrow-gymnastics needed.
+        // live.
         let Self {
             connections,
             events,
-            offset,
             ..
         } = self;
         let Some(conn) = connections.get_mut(&id) else {
             return Ok(PumpOutcome::PeerClosed);
         };
-        let offset = *offset;
 
         let mut buf = [0u8; 8 * 1024];
         let n = match conn.client.read(&mut buf) {
@@ -319,17 +300,11 @@ impl DbusBroker {
             return Ok(PumpOutcome::Active);
         }
 
-        // Slow path: walk every message, decide its disposition.
+        // Slow path: walk every message, decide its disposition. Any
+        // bytes before the first parsed message (auth tail, if the
+        // BEGIN landed in this same chunk) are prepended verbatim.
         let mut forwarded = Vec::with_capacity(out.forward.len());
-        // Copy the pre-message prefix (auth bytes if the BEGIN landed
-        // in this same chunk) verbatim.
         forwarded.extend_from_slice(&out.forward[..out.messages[0].offset]);
-
-        // We may still need cursor rewrite for the non-intercepted
-        // tail — track which messages survive so `apply_cursor_rewrites`
-        // can walk them. Using a scratch `Output` keeps the existing
-        // function signature.
-        let mut kept = emskin_dbus::broker::state::Output::default();
 
         for msg in &out.messages {
             tracing::info!(
@@ -365,22 +340,23 @@ impl DbusBroker {
             }
 
             if let Some(fm) = fcitx::classify(&msg.header, body) {
-                // Capture the destination the client used. After the
-                // client has resolved `org.fcitx.Fcitx5` via
-                // GetNameOwner it'll typically send subsequent calls
-                // to the resolved unique name (`:N.M` format); that's
-                // what we want as the sender of our signals.
+                // Capture the destination the client used as a
+                // fallback signal-sender source — the upstream
+                // GetNameOwner parse in `pump_upstream_to_client` is
+                // authoritative, but if for some reason that didn't
+                // land (e.g. the client skipped GetNameOwner and just
+                // used the well-known), the destination field of an
+                // intercepted call still tells us the unique name.
                 if let Some(dest) = msg.header.destination.as_deref() {
                     if dest.starts_with(':') && conn.fcitx_server_name.as_deref() != Some(dest) {
                         tracing::debug!(
                             ?id,
                             dest,
-                            "captured fcitx5 unique name for signal sender"
+                            "captured fcitx5 unique name from method_call destination"
                         );
                         conn.fcitx_server_name = Some(dest.to_string());
                     }
                 }
-                // Intercept.
                 let reply = fcitx::build_reply(
                     &msg.header,
                     &fm,
@@ -397,23 +373,8 @@ impl DbusBroker {
                 continue;
             }
 
-            // Not fcitx5 — keep for upstream.
-            let offset_in_kept = forwarded.len();
+            // Not fcitx5 — forward verbatim.
             forwarded.extend_from_slice(msg_bytes);
-            kept.messages
-                .push(emskin_dbus::broker::state::ObservedMessage {
-                    header: msg.header.clone(),
-                    offset: offset_in_kept,
-                    length: msg.length,
-                });
-        }
-
-        // Legacy cursor rewrite. Once M3 lands with winit IME driving,
-        // this branch should be dead (every SetCursorRect is Intercept).
-        if let Some(delta) = offset {
-            kept.forward = forwarded;
-            apply_cursor_rewrites(&mut kept, delta);
-            forwarded = kept.forward;
         }
 
         conn.upstream_out.extend(forwarded);
@@ -765,22 +726,6 @@ mod tests {
     #[test]
     fn rejects_tcp_scheme() {
         assert!(parse_unix_bus_address("tcp:host=localhost,port=1234").is_err());
-    }
-
-    #[test]
-    fn set_offset_round_trip() {
-        // Tiny: just exercise the Option<(i32, i32)> plumbing.
-        let dir = tempdir().unwrap();
-        let session = dir.path().join("s");
-        // Fake upstream: a listener we never dial to.
-        let upstream_path = dir.path().join("upstream.sock");
-        let _u = UnixListener::bind(&upstream_path).unwrap();
-        let mut b = DbusBroker::bind(&session, upstream_path).unwrap();
-        assert_eq!(b.offset(), None);
-        b.set_offset(Some((10, 20)));
-        assert_eq!(b.offset(), Some((10, 20)));
-        b.set_offset(None);
-        assert_eq!(b.offset(), None);
     }
 
     /// Helper: accept a client pair against a fake upstream listener.
