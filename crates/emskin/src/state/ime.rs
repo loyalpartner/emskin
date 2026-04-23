@@ -145,35 +145,58 @@ impl ImeBridge {
     }
 
     /// Desired `set_ime_cursor_area` value in emskin-winit-local
-    /// coords, or `None` when no IC has reported a valid position
-    /// yet. Derived purely from `active_fcitx_ic` — nothing else
-    /// contributes, so a FocusOut (which drops `active_fcitx_ic`)
-    /// automatically "unsets" the cursor area for the next sync.
+    /// coords, or `None` when no IC is active. When an IC is active
+    /// but hasn't reported a `current_rect` yet (FocusIn came
+    /// without a rect and the first CursorRect is still in flight),
+    /// falls back to `(origin, 1×1)` — a safe "anywhere on this
+    /// app's surface" sentinel. Without the fallback, winit's cursor
+    /// area cache holds over whatever the *previous* IC last wrote,
+    /// and when IME re-activates the host popup appears at that
+    /// stale position for one frame before the real CursorRect
+    /// updates it.
     fn desired_cursor_area(&self) -> Option<([i32; 2], [i32; 2])> {
         let active = self.active_fcitx_ic.as_ref()?;
-        let rect = active.current_rect?;
-        let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
-        let size = [rect[2].max(1), rect[3].max(1)];
-        Some((pos, size))
+        Some(match active.current_rect {
+            Some(rect) => (
+                [active.origin[0] + rect[0], active.origin[1] + rect[1]],
+                [rect[2].max(1), rect[3].max(1)],
+            ),
+            None => (active.origin, [1, 1]),
+        })
     }
 
     /// Sync the bridge's current state to winit. Called by the render
     /// loop's `apply_pending_state` every frame.
     ///
-    /// Order matters: **cursor area is set before IME allowed**. That
-    /// way when we're activating IME for a newly focused client,
-    /// winit has the fresh position staged before it tells the host
-    /// compositor "IME on" — otherwise the host IME momentarily sees
-    /// the previous client's cached position and the popup flashes
-    /// at the wrong spot.
+    /// Two ordering rules matter:
+    ///
+    /// 1. **cursor area is set before IME allowed.** When a newly
+    ///    focused client activates IME, the host compositor will
+    ///    position the popup based on whatever cursor rect winit
+    ///    has cached at the moment `enable` fires — so we push the
+    ///    fresh position *first*, then flip the activation.
+    ///
+    /// 2. **force-push cursor area when IME transitions off→on.**
+    ///    Even if `desired_cursor_area` equals
+    ///    `last_applied_cursor_area` by value, the host compositor
+    ///    may have dropped its own cache during the disabled
+    ///    window, or winit might batch differently. A redundant
+    ///    `set_ime_cursor_area` is cheap; the alternative is the
+    ///    popup showing at the previous client's position for one
+    ///    frame.
     pub fn sync_to_winit(&mut self, window: &winit_crate::window::Window) {
+        let want_allowed = self.desired_ime_allowed();
+        let activating = want_allowed && !self.last_applied_ime_allowed;
+
         if let Some((pos, size)) = self.desired_cursor_area() {
-            if self.last_applied_cursor_area != Some((pos, size)) {
+            let changed = self.last_applied_cursor_area != Some((pos, size));
+            if changed || activating {
                 window.set_ime_cursor_area(
                     winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
                     winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
                 );
                 tracing::info!(
+                    reason = if activating { "activating" } else { "changed" },
                     "winit.set_ime_cursor_area({}, {}, {}, {})",
                     pos[0], pos[1], size[0], size[1]
                 );
@@ -181,7 +204,6 @@ impl ImeBridge {
             }
         }
 
-        let want_allowed = self.desired_ime_allowed();
         if want_allowed != self.last_applied_ime_allowed {
             window.set_ime_allowed(want_allowed);
             tracing::info!("winit.set_ime_allowed({want_allowed})");
