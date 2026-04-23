@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use crate::broker::apply_cursor_rewrites;
 use crate::broker::state::ConnectionState;
-use crate::rules::cursor;
 
 const READ_BUF: usize = 8 * 1024;
 
@@ -210,46 +210,6 @@ fn drive_bus_to_client(mut bus: UnixStream, mut client: UnixStream) -> std::io::
             Err(e) => return Err(e),
         };
         client.write_all(&buf[..n])?;
-    }
-}
-
-fn apply_cursor_rewrites(out: &mut crate::broker::state::Output, delta: (i32, i32)) {
-    if out.messages.is_empty() {
-        return;
-    }
-    // Snapshot message descriptors so we can split-borrow `out.forward`
-    // mutably in the loop body.
-    let specs: Vec<(
-        cursor::CursorMethod,
-        crate::dbus::message::Endian,
-        usize,
-        usize,
-    )> = out
-        .messages
-        .iter()
-        .filter_map(|msg| {
-            let method = cursor::classify(&msg.header)?;
-            let body_len = msg.header.body_len as usize;
-            if body_len < method.expected_body_len() {
-                return None;
-            }
-            let body_start = msg.offset + msg.length - body_len;
-            let body_end = msg.offset + msg.length;
-            Some((method, msg.header.endian, body_start, body_end))
-        })
-        .collect();
-
-    for (method, endian, start, end) in specs {
-        if let Err(e) = cursor::apply_offset(method, endian, &mut out.forward[start..end], delta) {
-            tracing::warn!(error = %e, "cursor rewrite skipped");
-            continue;
-        }
-        tracing::info!(
-            ?method,
-            dx = delta.0,
-            dy = delta.1,
-            "cursor rewrite applied"
-        );
     }
 }
 
