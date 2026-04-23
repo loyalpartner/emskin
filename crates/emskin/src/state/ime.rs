@@ -8,6 +8,8 @@
 //! - `text_input.enter()/leave()` must be called by hand from `focus_changed` (smithay gates them on `input_method.has_instance()` and emskin implements no input_method protocol).
 //! - The `set_ime_allowed` decision is deferred via `ime_enabled` + [`ImeBridge::take_ime_enabled`] (`focus_changed` has no access to the winit backend).
 
+use std::time::{Duration, Instant};
+
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
@@ -15,6 +17,23 @@ use smithay::wayland::text_input::{TextInputHandle, TextInputManagerState, TextI
 
 use crate::apps::AppManager;
 use crate::EmskinState;
+
+/// Debounce window for `CursorRect` events following a `FocusIn`.
+///
+/// pgtk Emacs's GTK IM module fires a burst of `SetCursorRectV2`
+/// messages on FocusIn, and at least one of them carries a
+/// nonsense position like `[0, 700, 0, 20]` before the real caret
+/// coord arrives ~280ms later. Taking the last-one-wins in a tick
+/// made the candidate popup flicker to the bottom of the window
+/// on every focus change — visible as "飘" when the user switches
+/// away and comes back.
+///
+/// 100ms is long enough to cover the burst (in our logs it was
+/// all within ~10ms of FocusIn but the corrective value came back
+/// ~300ms later, meaning the bad values linger visibly), and short
+/// enough not to notice in normal typing (keystroke intervals are
+/// typically > 150ms).
+const FOCUS_IN_CURSOR_RECT_SETTLE: Duration = Duration::from_millis(300);
 
 /// `(-1, -1)` sentinel per text_input_v3 for "no cursor position".
 const NO_CURSOR: (i32, i32) = (-1, -1);
@@ -37,12 +56,27 @@ const NO_CURSOR: (i32, i32) = (-1, -1);
 /// Origin is refreshed on the next `FocusIn` (a FocusOut+FocusIn
 /// cycle re-captures the latest position), so drag-during-typing on
 /// a single IC is the only remaining stale case — acceptable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ActiveFcitxIc {
     pub conn: crate::dbus_broker::ConnId,
     pub ic_path: String,
     pub origin: [i32; 2],
+    /// When `FocusIn` staged this IC. Used to suppress the burst of
+    /// `CursorRect` events GTK IM fires immediately after focusing —
+    /// see [`FOCUS_IN_CURSOR_RECT_SETTLE`].
+    pub activated_at: Instant,
 }
+
+impl PartialEq for ActiveFcitxIc {
+    fn eq(&self, other: &Self) -> bool {
+        // `activated_at` is an Instant — excluded from equality so
+        // test fixtures comparing paired (conn, ic_path) via `==`
+        // don't have to construct matching timestamps.
+        self.conn == other.conn && self.ic_path == other.ic_path && self.origin == other.origin
+    }
+}
+
+impl Eq for ActiveFcitxIc {}
 
 pub struct ImeBridge {
     focused_surface: Option<WlSurface>,
@@ -166,6 +200,7 @@ impl ImeBridge {
                     conn,
                     ic_path,
                     origin,
+                    activated_at: Instant::now(),
                 });
                 self.dbus_wants_ime = true;
                 self.refresh_ime_enabled();
@@ -201,39 +236,47 @@ impl ImeBridge {
                 ic_path,
                 rect,
             } => {
-                if let Some(active) = self.active_fcitx_ic.as_ref() {
-                    if active.conn == conn && active.ic_path == ic_path {
-                        // Use the origin captured at FocusIn — NOT the
-                        // current keyboard focus's origin. See the
-                        // `ActiveFcitxIc` doc comment for why.
-                        let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
-                        let size = [rect[2].max(1), rect[3].max(1)];
-                        tracing::info!(
-                            ?conn,
-                            ?ic_path,
-                            client_rect = ?rect,
-                            origin = ?active.origin,
-                            ?pos,
-                            ?size,
-                            "fcitx IC CursorRect → staging winit set_ime_cursor_area"
-                        );
-                        self.pending_cursor_area = Some((pos, size));
-                    } else {
-                        tracing::debug!(
-                            ?conn,
-                            ?ic_path,
-                            active_conn = ?active.conn,
-                            active_ic = active.ic_path,
-                            "CursorRect ignored: not the active IC"
-                        );
-                    }
-                } else {
+                let Some(active) = self.active_fcitx_ic.as_ref() else {
+                    tracing::debug!(?conn, ?ic_path, "CursorRect ignored: no active IC");
+                    return;
+                };
+                if active.conn != conn || active.ic_path != ic_path {
                     tracing::debug!(
                         ?conn,
                         ?ic_path,
-                        "CursorRect ignored: no active IC"
+                        active_conn = ?active.conn,
+                        active_ic = active.ic_path,
+                        "CursorRect ignored: not the active IC"
                     );
+                    return;
                 }
+                // Debounce the initial burst of CursorRect events
+                // GTK IM fires on FocusIn — see FOCUS_IN_CURSOR_RECT_SETTLE.
+                let since_focus = active.activated_at.elapsed();
+                if since_focus < FOCUS_IN_CURSOR_RECT_SETTLE {
+                    tracing::debug!(
+                        ?conn,
+                        ?ic_path,
+                        client_rect = ?rect,
+                        since_focus_ms = since_focus.as_millis(),
+                        "CursorRect ignored: within FocusIn settle window"
+                    );
+                    return;
+                }
+                // Use the origin captured at FocusIn — NOT the current
+                // keyboard focus's origin. See the `ActiveFcitxIc` doc.
+                let pos = [active.origin[0] + rect[0], active.origin[1] + rect[1]];
+                let size = [rect[2].max(1), rect[3].max(1)];
+                tracing::info!(
+                    ?conn,
+                    ?ic_path,
+                    client_rect = ?rect,
+                    origin = ?active.origin,
+                    ?pos,
+                    ?size,
+                    "fcitx IC CursorRect → staging winit set_ime_cursor_area"
+                );
+                self.pending_cursor_area = Some((pos, size));
             }
             FcitxEvent::IcDestroyed { conn, ic_path } => {
                 if self
