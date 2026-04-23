@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use emskin_dbus::broker::{apply_cursor_rewrites, state::ConnectionState};
 use emskin_dbus::dbus::encode::{body_preedit, body_string, Signal};
+use emskin_dbus::dbus::message::{bytes_needed, parse_header, Endian, MessageType};
 use emskin_dbus::fcitx::{self, reply::next_nonzero, FcitxMethod, IcRegistry, INPUT_CONTEXT_IFACE};
 
 /// Sender name we stamp on synthesized signals. GDBus (and most other
@@ -120,18 +121,34 @@ struct Connection {
     /// method_returns / signals on this connection. Starts at 1 (DBus
     /// requires non-zero serials).
     serial_counter: u32,
-    /// Best-guess unique name for fcitx5 as the client knows it,
-    /// captured from the `destination` field of intercepted fcitx5
-    /// method_calls. DBus clients normally call `GetNameOwner` once
-    /// to resolve `org.fcitx.Fcitx5 → :1.N` and then use the unique
-    /// name as destination for efficiency, so by the time we see
-    /// method_calls like `InputContext1.FocusIn`, this field is
-    /// populated. Used as the `sender` of broker-synthesized signals
-    /// (`CommitString`, `UpdateFormattedPreedit`) — GDBus and friends
-    /// filter received signals against the unique name their match
-    /// rule's `sender=` clause resolves to, so getting this right is
-    /// what makes commits actually reach the client.
+    /// Best-guess unique name for fcitx5 as the client knows it.
+    /// Populated via two independent paths so whichever observes it
+    /// first wins:
+    ///   1. `GetNameOwner` replies from upstream (`upstream_buf` +
+    ///      `pending_name_lookups` below) — the authoritative source.
+    ///   2. The `destination` field of intercepted fcitx5 method_calls
+    ///      — a fallback for clients that skip GetNameOwner or whose
+    ///      reply we missed due to timing.
+    ///
+    /// Used as `sender` on broker-synthesized signals (`CommitString`,
+    /// `UpdateFormattedPreedit`). Per xdg-dbus-proxy (flatpak-proxy.c:
+    /// 2708), client libraries filter signals against the unique name
+    /// their match rule's `sender=` clause resolves to, so getting
+    /// this right is what makes commits actually reach the client.
     fcitx_server_name: Option<String>,
+    /// Buffer for incremental parsing of the bus → client byte stream.
+    /// Fed only after `state.is_authed()` is true — before that the
+    /// upstream is still in SASL mode (`OK <guid>\r\n`, `DATA`, …) and
+    /// those bytes shouldn't be parsed as DBus messages. Those bytes
+    /// are still forwarded to the client; we just don't inspect them.
+    upstream_buf: Vec<u8>,
+    /// Outstanding `GetNameOwner` requests the client has sent. Keyed
+    /// by the method_call's serial, value is the well-known name the
+    /// client was asking about. When the matching reply comes back
+    /// from upstream (reply_serial == this key), we parse its string
+    /// body to learn the unique name owner — and, if the looked-up
+    /// name is a fcitx5 well-known, cache it in `fcitx_server_name`.
+    pending_name_lookups: HashMap<u32, String>,
 }
 
 /// The in-process broker. Holds the listener, the upstream bus path for
@@ -237,6 +254,8 @@ impl DbusBroker {
                 ic_registry: IcRegistry::new(),
                 serial_counter: 0,
                 fcitx_server_name: None,
+                upstream_buf: Vec::new(),
+                pending_name_lookups: HashMap::new(),
             },
         );
 
@@ -325,6 +344,25 @@ impl DbusBroker {
             let msg_bytes = &out.forward[msg.offset..msg.offset + msg.length];
             let body_start_in_msg = msg.length - msg.header.body_len as usize;
             let body = &msg_bytes[body_start_in_msg..];
+
+            // Track outgoing `org.freedesktop.DBus.GetNameOwner(s)`
+            // requests that ask about a fcitx5 well-known name. When
+            // the matching reply comes back from upstream we'll learn
+            // the unique owner and cache it as our signal sender.
+            if is_get_name_owner_method(&msg.header) {
+                if let Some(name) = parse_arg0_string(body, msg.header.endian) {
+                    if fcitx::is_fcitx_well_known(&name) {
+                        tracing::debug!(
+                            ?id,
+                            serial = msg.header.serial,
+                            name,
+                            "tracking GetNameOwner for fcitx5 name"
+                        );
+                        conn.pending_name_lookups
+                            .insert(msg.header.serial, name);
+                    }
+                }
+            }
 
             if let Some(fm) = fcitx::classify(&msg.header, body) {
                 // Capture the destination the client used. After the
@@ -508,8 +546,14 @@ impl DbusBroker {
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
 
-    /// Upstream → client pump. Raw pass-through (phase 1 doesn't inspect
-    /// bus → client traffic). Same buffering story as the other pump.
+    /// Upstream → client pump. Forwards bytes verbatim, and (once the
+    /// client is past SASL) ALSO parses them as DBus messages so we
+    /// can observe replies to our outstanding GetNameOwner requests
+    /// and learn the fcitx5 unique-name mapping.
+    ///
+    /// Forwarding is independent of parsing — even if the parser
+    /// errors on a malformed upstream reply, the bytes still reach
+    /// the client. We just stop observing.
     pub fn pump_upstream_to_client(&mut self, id: ConnId) -> io::Result<PumpOutcome> {
         let Some(conn) = self.connections.get_mut(&id) else {
             return Ok(PumpOutcome::PeerClosed);
@@ -522,8 +566,80 @@ impl DbusBroker {
             Err(e) if e.kind() == ErrorKind::Interrupted => return Ok(PumpOutcome::Active),
             Err(e) => return Err(e),
         };
+        // Forward verbatim first — preserve existing behavior.
         conn.client_out.extend(&buf[..n]);
         Self::try_flush(&mut conn.client, &mut conn.client_out)?;
+
+        // Observe post-SASL bytes. `state.is_authed()` only flips once
+        // the client's `BEGIN\r\n` has crossed the wire, which happens
+        // AFTER upstream has finished its `OK <guid>\r\n` handshake —
+        // so once authed, every byte arriving from upstream is a DBus
+        // v1 message frame.
+        if !conn.state.is_authed() {
+            return Ok(PumpOutcome::Active);
+        }
+        conn.upstream_buf.extend_from_slice(&buf[..n]);
+        loop {
+            let total = match bytes_needed(&conn.upstream_buf) {
+                Ok(None) => break,
+                Ok(Some(n)) => n,
+                Err(e) => {
+                    tracing::warn!(?id, error = %e, "upstream parser: giving up on this conn");
+                    conn.upstream_buf.clear();
+                    break;
+                }
+            };
+            if conn.upstream_buf.len() < total {
+                break;
+            }
+            let frame = conn
+                .upstream_buf
+                .drain(..total)
+                .collect::<Vec<u8>>();
+            let header = match parse_header(&frame) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(?id, error = %e, "upstream parser: bad header");
+                    continue;
+                }
+            };
+            // We only care about method_returns to our tracked
+            // GetNameOwner requests. Everything else (signals like
+            // NameOwnerChanged, other method_returns, errors …) is
+            // ignored — they're forwarded to the client verbatim.
+            if header.msg_type != MessageType::MethodReturn {
+                continue;
+            }
+            let Some(reply_serial) = header.reply_serial else {
+                continue;
+            };
+            let Some(looked_up) = conn.pending_name_lookups.remove(&reply_serial) else {
+                continue;
+            };
+            // GetNameOwner reply body signature is `s` — a single
+            // string that's the unique-name owner of the queried
+            // well-known.
+            let body_start = total - header.body_len as usize;
+            let body = &frame[body_start..];
+            let Some(owner) = parse_arg0_string(body, header.endian) else {
+                tracing::warn!(
+                    ?id,
+                    reply_serial,
+                    looked_up,
+                    "GetNameOwner reply body not a string; skipping"
+                );
+                continue;
+            };
+            tracing::info!(
+                ?id,
+                name = looked_up,
+                owner,
+                "resolved fcitx5 unique owner via GetNameOwner reply"
+            );
+            // Authoritative source — overwrites any earlier guess
+            // from the destination-capture path.
+            conn.fcitx_server_name = Some(owner);
+        }
         Ok(PumpOutcome::Active)
     }
 
@@ -580,6 +696,35 @@ impl Drop for DbusBroker {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.listen_path);
     }
+}
+
+/// Parse the `arg0` of a DBus message body whose signature is `s`.
+/// Returns `None` on short / malformed bodies — caller should log +
+/// skip. Separate helper rather than part of
+/// `emskin_dbus::fcitx::classify` because the latter is tied to the
+/// fcitx5 interfaces; this one is generic.
+fn parse_arg0_string(body: &[u8], endian: Endian) -> Option<String> {
+    if body.len() < 4 {
+        return None;
+    }
+    let arr: [u8; 4] = body[0..4].try_into().ok()?;
+    let len = match endian {
+        Endian::Little => u32::from_le_bytes(arr),
+        Endian::Big => u32::from_be_bytes(arr),
+    } as usize;
+    if body.len() < 4 + len + 1 {
+        return None;
+    }
+    std::str::from_utf8(&body[4..4 + len]).ok().map(String::from)
+}
+
+/// Recognize `org.freedesktop.DBus.GetNameOwner(s)` method_calls so
+/// the broker can track the request and match the eventual reply's
+/// unique-name body back to the looked-up well-known.
+fn is_get_name_owner_method(header: &emskin_dbus::dbus::message::Header) -> bool {
+    header.interface.as_deref() == Some("org.freedesktop.DBus")
+        && header.member.as_deref() == Some("GetNameOwner")
+        && header.signature.as_deref() == Some("s")
 }
 
 /// Parse `unix:path=/run/user/1000/bus[,guid=…]` into the filesystem
@@ -765,6 +910,98 @@ mod tests {
         broker.remove_connection(id);
     }
 
+    /// GetNameOwner round-trip: client asks about
+    /// `org.fcitx.Fcitx5`, the broker forwards to upstream, upstream
+    /// replies with the real unique name, and the broker caches it on
+    /// the connection's `fcitx_server_name`. Covers the main fix for
+    /// "signals dropped because sender is well-known not unique".
+    #[test]
+    fn get_name_owner_reply_caches_fcitx_unique_name() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, mut upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        // Step 1: client sends handshake + GetNameOwner("org.fcitx.Fcitx5")
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        let req = build_get_name_owner(77, "org.fcitx.Fcitx5");
+        let mut payload = Vec::from(&handshake[..]);
+        payload.extend_from_slice(&req);
+        client.write_all(&payload).unwrap();
+
+        for _ in 0..5 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Request should have been forwarded to upstream — we don't
+        // intercept `org.freedesktop.DBus` methods, only track them.
+        let upstream_got = drain(&mut upstream_peer);
+        assert!(upstream_got.starts_with(handshake));
+        assert!(
+            upstream_got.len() > handshake.len(),
+            "GetNameOwner should reach upstream"
+        );
+
+        // Step 2: upstream replies with method_return carrying the
+        // unique name `:1.42`.
+        let reply = build_name_owner_reply(77, ":1.42");
+        upstream_peer.write_all(&reply).unwrap();
+
+        for _ in 0..5 {
+            broker.pump_upstream_to_client(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        // Reply gets forwarded to client (the broker doesn't swallow
+        // it — the client still needs to process it for its own
+        // bookkeeping).
+        let client_got = drain(&mut client);
+        assert!(!client_got.is_empty(), "reply should reach client");
+
+        // And the broker should now have cached the unique name for
+        // signal emission.
+        let c = broker.connections.get(&id).expect("conn alive");
+        assert_eq!(c.fcitx_server_name.as_deref(), Some(":1.42"));
+        // The pending lookup should have been consumed.
+        assert!(c.pending_name_lookups.is_empty());
+
+        broker.remove_connection(id);
+    }
+
+    /// Non-fcitx5 GetNameOwner lookups (e.g. asking about
+    /// `org.freedesktop.Notifications`) should NOT be tracked — the
+    /// broker only cares about fcitx5 names.
+    #[test]
+    fn get_name_owner_for_unrelated_name_is_not_tracked() {
+        let dir = tempdir().unwrap();
+        let session = dir.path().join("s");
+        let upstream_path = dir.path().join("upstream.sock");
+        let upstream_listener = UnixListener::bind(&upstream_path).unwrap();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (mut broker, mut client, _upstream_peer, id) =
+            setup_pair(&session, upstream_path, &upstream_listener);
+
+        let handshake = b"\0AUTH EXTERNAL 30\r\nBEGIN\r\n";
+        let req = build_get_name_owner(88, "org.freedesktop.Notifications");
+        let mut payload = Vec::from(&handshake[..]);
+        payload.extend_from_slice(&req);
+        client.write_all(&payload).unwrap();
+
+        for _ in 0..5 {
+            broker.pump_client_to_upstream(id).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let c = broker.connections.get(&id).expect("conn alive");
+        assert!(c.pending_name_lookups.is_empty());
+
+        broker.remove_connection(id);
+    }
+
     /// CreateInputContext: the broker should allocate an IC path,
     /// send back `(o, ay)` in the method_return, and NOT forward to
     /// upstream (real fcitx5 never learns about this client).
@@ -832,6 +1069,65 @@ mod tests {
         out.push(sig.len() as u8);
         out.extend_from_slice(sig.as_bytes());
         out.push(0);
+    }
+
+    /// A `GetNameOwner(s)` method_call asking the DBus daemon who
+    /// owns `name`.
+    fn build_get_name_owner(serial: u32, name: &str) -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_string_field(&mut fields, 1, "o", "/org/freedesktop/DBus");
+        push_string_field(&mut fields, 2, "s", "org.freedesktop.DBus");
+        push_string_field(&mut fields, 3, "s", "GetNameOwner");
+        push_string_field(&mut fields, 6, "s", "org.freedesktop.DBus");
+        push_signature_field(&mut fields, 8, "s");
+
+        // Body: a single `s` arg.
+        let mut body = Vec::new();
+        body.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[b'l', 1, 0, 1]);
+        msg.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&serial.to_le_bytes());
+        msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&fields);
+        pad_to(&mut msg, 8);
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    /// A method_return from the DBus daemon that answers a
+    /// `GetNameOwner` request with a unique-name string.
+    fn build_name_owner_reply(reply_serial: u32, unique_name: &str) -> Vec<u8> {
+        let mut fields = Vec::new();
+        // REPLY_SERIAL field: code 5, variant sig "u", u32 value.
+        pad_to(&mut fields, 8);
+        fields.push(5);
+        fields.push(1);
+        fields.push(b'u');
+        fields.push(0);
+        pad_to(&mut fields, 4);
+        fields.extend_from_slice(&reply_serial.to_le_bytes());
+        push_string_field(&mut fields, 7, "s", "org.freedesktop.DBus"); // SENDER
+        push_signature_field(&mut fields, 8, "s"); // body sig
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&(unique_name.len() as u32).to_le_bytes());
+        body.extend_from_slice(unique_name.as_bytes());
+        body.push(0);
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[b'l', 2, 0, 1]); // type=2 (method_return)
+        msg.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        // Our own serial for this reply — any non-zero value works.
+        msg.extend_from_slice(&9999u32.to_le_bytes());
+        msg.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        msg.extend_from_slice(&fields);
+        pad_to(&mut msg, 8);
+        msg.extend_from_slice(&body);
+        msg
     }
 
     /// A plain DBus `Hello` method_call (goes to the DBus daemon, not

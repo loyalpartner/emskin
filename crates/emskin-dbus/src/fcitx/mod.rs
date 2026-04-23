@@ -64,6 +64,15 @@ pub fn is_fcitx_interface(iface: &str) -> bool {
     )
 }
 
+/// Check whether `name` is one of the well-known DBus service names
+/// fcitx5 registers — `org.fcitx.Fcitx5`, `org.freedesktop.portal.Fcitx`,
+/// or the legacy fcitx4 `org.fcitx.Fcitx`. Used to recognize
+/// `GetNameOwner` lookups the client makes against fcitx5 and record
+/// the answer for signal-sender bookkeeping.
+pub fn is_fcitx_well_known(name: &str) -> bool {
+    FCITX5_WELL_KNOWN_NAMES.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
