@@ -5,12 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Selective DBus session-bus proxy for nested Wayland compositors — name registry, policy rules, and IME coordinate translation"
+description = "DBus session-bus protocol primitives (SASL + v1 parser + per-connection state machine + IME cursor-coord rewrite) for nested Wayland compositors"
 
 [dependencies]
 tracing.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-
-[dev-dependencies]
-tempfile = "3"

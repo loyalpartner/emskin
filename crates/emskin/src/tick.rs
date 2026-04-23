@@ -28,19 +28,6 @@ pub fn event_loop_tick(state: &mut EmskinState) {
         }
     }
 
-    // --- Reap the emskin-dbus-proxy child if it exited ---
-    // Same rationale as the bar — non-critical, loss means IME cursor
-    // coords won't be rewritten but other traffic is unaffected. On exit
-    // we also drop the ctl client so push_rect / push_cleared no-op.
-    if let Some(ref mut child) = state.dbus.proxy_child {
-        if let Ok(Some(status)) = child.try_wait() {
-            tracing::warn!("emskin-dbus-proxy exited with {status}");
-            state.dbus.proxy_child = None;
-            state.dbus.ctl = None;
-            state.dbus.listen_path = None;
-        }
-    }
-
     // --- Workspace: process deferred Emacs toplevels ---
     // After dispatch_clients, set_parent has been processed for same-batch
     // toplevels, so surface.parent() is now accurate.
@@ -132,7 +119,7 @@ fn reconcile_dbus_focus(state: &mut EmskinState) {
     }
 }
 
-fn focused_app_rect(state: &EmskinState) -> Option<emskin_dbus::protocol::Rect> {
+fn focused_app_rect(state: &EmskinState) -> Option<[i32; 4]> {
     let kb = state.seat.get_keyboard()?;
     let focus = kb.current_focus()?;
     let window = match focus {

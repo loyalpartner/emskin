@@ -176,12 +176,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("EMSKIN_DISABLE_HOST_CLIPBOARD set; host clipboard sync disabled");
     }
 
-    // Spawn emskin-dbus-proxy before any child processes; its `Ready` ack
-    // arrives before `inject_env` is invoked by `spawn_child` / `spawn_bar`.
-    // A missing binary or absent host session bus downgrades the bridge to
-    // an inert state — embedded IME popups will then land wherever they
-    // always did (no regression vs. pre-proxy behavior).
-    state.dbus = state::dbus::DbusBridge::spawn_and_connect();
+    // Bind the in-process DBus broker before any child processes; its
+    // listen socket must exist by the time `inject_env` stamps
+    // `DBUS_SESSION_BUS_ADDRESS` on `spawn_child` / `spawn_bar`. A
+    // missing or unparseable upstream bus downgrades the bridge to an
+    // inert state — embedded IME popups then land wherever they always
+    // did (no regression vs. pre-broker behavior).
+    state.dbus = state::dbus::DbusBridge::init();
+    if state.dbus.broker.is_some() {
+        register_dbus_listen_source(&event_loop, &state)?;
+    }
 
     if !cli.no_spawn {
         state.xwayland.set_pending_command(state::PendingCommand {
@@ -256,6 +260,188 @@ fn register_ipc_source(
         )
         .map_err(|e| format!("failed to register IPC listener: {e}"))?;
     Ok(())
+}
+
+/// Register the DBus broker's listen socket with calloop. Each accepted
+/// connection fans out to two more Generic sources (`client → upstream`
+/// and `upstream → client` pumps) via [`handle_dbus_accept`]. Assumes
+/// `state.dbus.broker.is_some()` — caller is expected to guard.
+fn register_dbus_listen_source(
+    event_loop: &smithay::reexports::calloop::EventLoop<EmskinState>,
+    state: &EmskinState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
+    use std::os::unix::io::FromRawFd;
+
+    let Some(broker) = state.dbus.broker.as_ref() else {
+        return Ok(());
+    };
+    let listener_fd = broker.listener_fd();
+    // SAFETY: we dup the listener fd so the Generic source owns its own
+    // copy. The original lives inside `DbusBroker::listener` for the
+    // entire compositor run.
+    let dup_fd = unsafe { libc::dup(listener_fd) };
+    if dup_fd < 0 {
+        return Err("dup(dbus listener fd) failed".into());
+    }
+    // SAFETY: dup_fd was just produced by libc::dup, so it's open and
+    // owned by us. Passing to File::from_raw_fd transfers ownership; the
+    // original listener_fd stays open in DbusBroker.
+    let file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+    event_loop
+        .handle()
+        .insert_source(
+            Generic::new(file, Interest::READ, Mode::Level),
+            |_, _, state| {
+                handle_dbus_accept(state);
+                Ok(PostAction::Continue)
+            },
+        )
+        .map_err(|e| format!("failed to register dbus listener: {e}"))?;
+    Ok(())
+}
+
+/// Drain every pending accept on the broker's listen socket, and for
+/// each accepted pair register one calloop source per fd. Level-
+/// triggered so we technically only need to accept once, but a loop is
+/// cheap and cuts wakeup count when multiple clients dial in one tick.
+fn handle_dbus_accept(state: &mut EmskinState) {
+    loop {
+        let Some(broker) = state.dbus.broker.as_mut() else {
+            return;
+        };
+        let accepted = match broker.accept_one() {
+            Ok(Some(a)) => a,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "dbus broker: accept failed");
+                return;
+            }
+        };
+        register_dbus_connection(state, accepted);
+    }
+}
+
+/// Register the two per-connection calloop sources for one accepted
+/// `(client, upstream)` pair. Each source pumps one direction; on EOF
+/// or I/O error, both sources are torn down and the broker's connection
+/// state is freed.
+fn register_dbus_connection(state: &mut EmskinState, accepted: emskin::dbus_broker::ConnAccepted) {
+    use emskin::dbus_broker::PumpOutcome;
+    use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
+    use std::os::unix::io::FromRawFd;
+
+    let id = accepted.id;
+    let client_dup = unsafe { libc::dup(accepted.client_fd) };
+    let upstream_dup = unsafe { libc::dup(accepted.upstream_fd) };
+    if client_dup < 0 || upstream_dup < 0 {
+        tracing::warn!(?id, "dbus broker: fd dup failed; dropping connection");
+        if let Some(broker) = state.dbus.broker.as_mut() {
+            broker.remove_connection(id);
+        }
+        if client_dup >= 0 {
+            unsafe { libc::close(client_dup) };
+        }
+        if upstream_dup >= 0 {
+            unsafe { libc::close(upstream_dup) };
+        }
+        return;
+    }
+    // SAFETY: both dup fds are open and owned by us. File::from_raw_fd
+    // takes ownership; closing is handled when the Generic source is
+    // removed and its File drops.
+    let client_file = unsafe { std::fs::File::from_raw_fd(client_dup) };
+    let upstream_file = unsafe { std::fs::File::from_raw_fd(upstream_dup) };
+
+    let loop_handle = state.loop_handle.clone();
+
+    let client_token = match loop_handle.insert_source(
+        Generic::new(client_file, Interest::READ, Mode::Level),
+        move |_, _, state| {
+            let Some(broker) = state.dbus.broker.as_mut() else {
+                return Ok(PostAction::Remove);
+            };
+            match broker.pump_client_to_upstream(id) {
+                Ok(PumpOutcome::Active) => Ok(PostAction::Continue),
+                Ok(PumpOutcome::PeerClosed) => {
+                    drop_dbus_connection(state, id, DropSide::Client);
+                    Ok(PostAction::Remove)
+                }
+                Err(e) => {
+                    tracing::warn!(?id, error = %e, "dbus broker: c2u pump failed");
+                    drop_dbus_connection(state, id, DropSide::Client);
+                    Ok(PostAction::Remove)
+                }
+            }
+        },
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(?id, error = %e, "failed to register dbus client source");
+            if let Some(broker) = state.dbus.broker.as_mut() {
+                broker.remove_connection(id);
+            }
+            return;
+        }
+    };
+
+    let upstream_token = match loop_handle.insert_source(
+        Generic::new(upstream_file, Interest::READ, Mode::Level),
+        move |_, _, state| {
+            let Some(broker) = state.dbus.broker.as_mut() else {
+                return Ok(PostAction::Remove);
+            };
+            match broker.pump_upstream_to_client(id) {
+                Ok(PumpOutcome::Active) => Ok(PostAction::Continue),
+                Ok(PumpOutcome::PeerClosed) => {
+                    drop_dbus_connection(state, id, DropSide::Upstream);
+                    Ok(PostAction::Remove)
+                }
+                Err(e) => {
+                    tracing::warn!(?id, error = %e, "dbus broker: u2c pump failed");
+                    drop_dbus_connection(state, id, DropSide::Upstream);
+                    Ok(PostAction::Remove)
+                }
+            }
+        },
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(?id, error = %e, "failed to register dbus upstream source");
+            state.loop_handle.remove(client_token);
+            if let Some(broker) = state.dbus.broker.as_mut() {
+                broker.remove_connection(id);
+            }
+            return;
+        }
+    };
+
+    state
+        .dbus
+        .connection_tokens
+        .insert(id, (client_token, upstream_token));
+}
+
+/// Identifies which side triggered the teardown. We're called from
+/// inside one of the two per-connection callbacks — that callback will
+/// return `PostAction::Remove` itself. This function removes the
+/// *other* source explicitly, plus the broker's connection state.
+#[derive(Debug, Clone, Copy)]
+enum DropSide {
+    Client,
+    Upstream,
+}
+
+fn drop_dbus_connection(state: &mut EmskinState, id: emskin::dbus_broker::ConnId, side: DropSide) {
+    if let Some((client_token, upstream_token)) = state.dbus.connection_tokens.remove(&id) {
+        match side {
+            DropSide::Client => state.loop_handle.remove(upstream_token),
+            DropSide::Upstream => state.loop_handle.remove(client_token),
+        }
+    }
+    if let Some(broker) = state.dbus.broker.as_mut() {
+        broker.remove_connection(id);
+    }
 }
 
 fn spawn_child(

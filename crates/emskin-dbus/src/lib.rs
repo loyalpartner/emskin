@@ -1,28 +1,20 @@
-//! emskin-dbus — Selective DBus session-bus proxy for nested Wayland compositors.
+//! emskin-dbus — DBus session-bus protocol primitives for nested Wayland
+//! compositors.
 //!
-//! Scope (phase 1):
-//!   - Transparent pass-through of DBus session-bus traffic from embedded
-//!     clients to the host session bus.
-//!   - Control channel (ctl-socket) so the compositor can push per-client
-//!     host-screen rectangles.
-//!   - Arg rewrite for `org.fcitx.Fcitx5.InputContext1.SetCursorRect` /
-//!     `org.fcitx.Fcitx.InputContext.SetCursorLocation` that translates
-//!     client-local caret coordinates into host-screen-absolute coordinates
-//!     using the rectangles pushed over ctl-socket. Closes emskin/emskin#55.
+//! Scope:
+//!   - SASL handshake scanning (`dbus::sasl`).
+//!   - DBus v1 header parsing (`dbus::message`).
+//!   - Per-connection state machine (`broker::state::ConnectionState`).
+//!   - Cursor-coord rewrite rules for fcitx4/fcitx5 IME methods
+//!     (`rules::cursor`).
+//!   - `apply_cursor_rewrites` pass over an `Output` in place
+//!     (`broker::apply_cursor_rewrites`).
 //!
-//! Later phases (not in this crate's phase 1 surface):
-//!   - Local name registry for `org.gnome.*` / `org.kde.*` `RequestName`
-//!     interception (closes emskin/emskin#60).
-//!   - Merged `ListNames` / `NameOwnerChanged` view.
-//!   - Policy-driven per-service passthrough / local-own / deny matrix.
-//!
-//! The crate has zero smithay deps on purpose — it is reusable by any
-//! other nested compositor (cage, wio, niri-in-plasma, …) in the same
-//! spirit as the sibling `emskin-clipboard` crate.
+//! The broker's socket-level I/O driver is not in this crate — it lives
+//! in `emskin::dbus_broker`. That keeps this crate pure enough to be
+//! consumed by any nested compositor that wants the parser + rewrite
+//! rules without taking on calloop or smithay.
 
 pub mod broker;
-pub mod codec;
-pub mod ctl;
 pub mod dbus;
-pub mod protocol;
 pub mod rules;
