@@ -15,5 +15,6 @@
 //!   - `xdg-dbus-proxy` (flatpak) `flatpak-proxy.c` — the transparent-broker
 //!     shape this crate borrows from.
 
+pub mod encode;
 pub mod message;
 pub mod sasl;

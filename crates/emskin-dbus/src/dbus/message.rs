@@ -75,16 +75,17 @@ impl MessageType {
     }
 }
 
-// Header-field codes (dbus spec table).
+// Header-field codes (dbus spec table). `pub(crate)` so the sibling
+// `encode` module can reuse the same constants when building messages.
 const FIELD_INVALID: u8 = 0;
-const FIELD_PATH: u8 = 1;
-const FIELD_INTERFACE: u8 = 2;
-const FIELD_MEMBER: u8 = 3;
-const FIELD_ERROR_NAME: u8 = 4;
-const FIELD_REPLY_SERIAL: u8 = 5;
-const FIELD_DESTINATION: u8 = 6;
-const FIELD_SENDER: u8 = 7;
-const FIELD_SIGNATURE: u8 = 8;
+pub(crate) const FIELD_PATH: u8 = 1;
+pub(crate) const FIELD_INTERFACE: u8 = 2;
+pub(crate) const FIELD_MEMBER: u8 = 3;
+pub(crate) const FIELD_ERROR_NAME: u8 = 4;
+pub(crate) const FIELD_REPLY_SERIAL: u8 = 5;
+pub(crate) const FIELD_DESTINATION: u8 = 6;
+pub(crate) const FIELD_SENDER: u8 = 7;
+pub(crate) const FIELD_SIGNATURE: u8 = 8;
 const FIELD_UNIX_FDS: u8 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
