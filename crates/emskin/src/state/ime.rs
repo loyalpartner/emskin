@@ -106,6 +106,14 @@ pub struct ImeBridge {
     tip_wants_ime: bool,
     /// DBus fcitx5 frontend state. `None` = no IC active.
     active_fcitx_ic: Option<ActiveFcitxIc>,
+    /// Cursor area the text_input_v3 path wants pushed to winit,
+    /// computed from `ti.cursor_rectangle()` + the focused client's
+    /// emskin-space origin. Refreshed in [`Self::on_host_ime_event`]
+    /// and cleared on every focus change so a previous
+    /// text_input_v3 client's rect never lingers past its focus —
+    /// the critical fix for "alacritty → Emacs, popup jumps to
+    /// alacritty's relative cursor position".
+    tip_cursor_area: Option<([i32; 2], [i32; 2])>,
 
     /// What we last told winit via `set_ime_allowed`. Used to diff
     /// against the current desired state and only emit the call when
@@ -126,6 +134,7 @@ impl ImeBridge {
             focused_surface: None,
             tip_wants_ime: false,
             active_fcitx_ic: None,
+            tip_cursor_area: None,
             last_applied_ime_allowed: false,
             last_applied_cursor_area: None,
         }
@@ -145,24 +154,31 @@ impl ImeBridge {
     }
 
     /// Desired `set_ime_cursor_area` value in emskin-winit-local
-    /// coords, or `None` when no IC is active. When an IC is active
-    /// but hasn't reported a `current_rect` yet (FocusIn came
-    /// without a rect and the first CursorRect is still in flight),
-    /// falls back to `(origin, 1×1)` — a safe "anywhere on this
-    /// app's surface" sentinel. Without the fallback, winit's cursor
-    /// area cache holds over whatever the *previous* IC last wrote,
-    /// and when IME re-activates the host popup appears at that
-    /// stale position for one frame before the real CursorRect
-    /// updates it.
+    /// coords, computed from whichever IME path has demand.
+    ///
+    /// DBus fcitx5 (`active_fcitx_ic`) takes precedence over
+    /// text_input_v3 (`tip_cursor_area`) because a DBus IC's
+    /// presence means a client actively FocusIn'd via that channel —
+    /// any text_input_v3 state from a now-defocused alacritty
+    /// lingering in `ti.cursor_rectangle()` would otherwise override
+    /// the DBus client's real caret.
+    ///
+    /// With a DBus IC active but `current_rect` still `None`
+    /// (FocusIn came without a rect and no CursorRect has arrived
+    /// yet), falls back to `(origin, 1×1)` — safer than returning
+    /// `None`, which would leave winit's cache holding the previous
+    /// IC's position until the first real CursorRect overwrites it.
     fn desired_cursor_area(&self) -> Option<([i32; 2], [i32; 2])> {
-        let active = self.active_fcitx_ic.as_ref()?;
-        Some(match active.current_rect {
-            Some(rect) => (
-                [active.origin[0] + rect[0], active.origin[1] + rect[1]],
-                [rect[2].max(1), rect[3].max(1)],
-            ),
-            None => (active.origin, [1, 1]),
-        })
+        if let Some(active) = self.active_fcitx_ic.as_ref() {
+            return Some(match active.current_rect {
+                Some(rect) => (
+                    [active.origin[0] + rect[0], active.origin[1] + rect[1]],
+                    [rect[2].max(1), rect[3].max(1)],
+                ),
+                None => (active.origin, [1, 1]),
+            });
+        }
+        self.tip_cursor_area
     }
 
     /// Sync the bridge's current state to winit. Called by the render
@@ -340,22 +356,42 @@ impl ImeBridge {
         );
         self.focused_surface = new_focus;
         self.tip_wants_ime = has_tip;
+        // Clear the text_input_v3 path's cached cursor area — the
+        // previous client's rect must not linger past its focus.
+        // smithay's TextInputHandle doesn't auto-clear
+        // `cursor_rectangle` on focus change, so without this, a
+        // stale alacritty rect would still pollute
+        // `desired_cursor_area` after switching away.
+        self.tip_cursor_area = None;
     }
 
     /// Forward a host IME event to the focused text_input_v3 client
     /// (Wayland-native path). DBus-fcitx5 side is handled by the
     /// broker's `emit_commit_string` / `emit_preedit`.
+    ///
+    /// Also refreshes the text_input_v3 path's `tip_cursor_area` so
+    /// the next [`Self::sync_to_winit`] picks up the current rect
+    /// (only when the focused client actually bound
+    /// `zwp_text_input_v3`). Skipping this for non-text_input_v3
+    /// clients is what stops a previously-focused alacritty's rect
+    /// from overriding the DBus path's position for Emacs.
     pub fn on_host_ime_event(
         &mut self,
         event: winit_crate::event::Ime,
         seat: &Seat<EmskinState>,
         apps: &AppManager,
-        window: &winit_crate::window::Window,
+        _window: &winit_crate::window::Window,
     ) {
         use winit_crate::event::Ime;
 
         let ti = seat.text_input();
-        sync_ime_cursor_area(ti, apps, window);
+        if self.tip_wants_ime {
+            self.tip_cursor_area = compute_tip_cursor_area(ti, apps);
+        } else {
+            // Focused client doesn't bind text_input_v3 — DBus path
+            // owns cursor_area if anything does. Drop any stale value.
+            self.tip_cursor_area = None;
+        }
 
         match event {
             Ime::Enabled => {
@@ -400,6 +436,7 @@ impl ImeBridge {
         tracing::debug!("IME: reset on workspace switch");
         self.focused_surface = None;
         self.tip_wants_ime = false;
+        self.tip_cursor_area = None;
         self.active_fcitx_ic = None;
         // Don't reset `last_applied_*` — next `sync_to_winit` diffs
         // against actual state and will push whatever the new
@@ -440,29 +477,29 @@ fn focused_client_has_text_input(ti: &TextInputHandle) -> bool {
     found
 }
 
-/// Position the host IME popup on the embedded client's caret — the
-/// text_input_v3 path. The DBus path goes through
-/// `ImeBridge::sync_to_winit` instead.
-fn sync_ime_cursor_area(
+/// Compute the cursor area for a text_input_v3-bound focused client,
+/// from `ti.cursor_rectangle()` (client-surface-local) + the
+/// client's emskin-space origin. Returns `None` if there's no rect
+/// yet or the focused surface isn't tracked as an embedded app.
+///
+/// Caller must only invoke this when the focused client actually
+/// bound text_input_v3 — smithay's `TextInputHandle.cursor_rectangle`
+/// doesn't clear on focus change, so calling this for a non-
+/// text_input_v3 client returns the previous client's stale rect.
+fn compute_tip_cursor_area(
     ti: &TextInputHandle,
     apps: &AppManager,
-    window: &winit_crate::window::Window,
-) {
-    let Some(rect) = ti.cursor_rectangle() else {
-        return;
-    };
+) -> Option<([i32; 2], [i32; 2])> {
+    let rect = ti.cursor_rectangle()?;
     let app_loc = ti
         .focus()
         .and_then(|surface| apps.surface_geometry(&surface))
         .map(|geo| geo.loc)
         .unwrap_or_default();
-    window.set_ime_cursor_area(
-        winit_crate::dpi::LogicalPosition::new(
-            (rect.loc.x + app_loc.x) as f64,
-            (rect.loc.y + app_loc.y) as f64,
-        ),
-        winit_crate::dpi::LogicalSize::new(rect.size.w as f64, rect.size.h as f64),
-    );
+    Some((
+        [rect.loc.x + app_loc.x, rect.loc.y + app_loc.y],
+        [rect.size.w.max(1), rect.size.h.max(1)],
+    ))
 }
 
 // Allow `ActiveFcitxIc` equality in tests to ignore runtime-transient
