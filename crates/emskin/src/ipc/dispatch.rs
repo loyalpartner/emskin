@@ -15,6 +15,10 @@ pub fn handle_ipc_message(state: &mut EmskinState, msg: IncomingMessage) {
         IncomingMessage::PrefixDone => {
             ipc_prefix_done(state);
         }
+        IncomingMessage::PrefixClear => {
+            // IME-only cleanup, no focus restoration.
+            state.ime.set_prefix_active(false);
+        }
         IncomingMessage::AddMirror {
             window_id,
             view_id,
@@ -225,7 +229,11 @@ fn ipc_set_visibility(state: &mut EmskinState, window_id: u64, visible: bool) {
 }
 
 fn ipc_prefix_done(state: &mut EmskinState) {
-    let Some(saved) = state.focus.prefix_saved_focus.take() else {
+    // Always re-enable host IME at chord end, even if no prefix override
+    // was active (so Emacs's prefix_done IPC remains functional after a
+    // dropped intermediate IPC).
+    state.ime.set_prefix_active(false);
+    let Some(saved) = state.focus.exit(crate::state::FocusOverride::Prefix) else {
         return;
     };
     let Some(keyboard) = state.seat.get_keyboard() else {
@@ -309,7 +317,8 @@ fn ipc_set_focus(state: &mut EmskinState, window_id: Option<u64>) {
         None => state.emacs_focus_target(),
     };
     tracing::debug!("IPC set_focus window_id={window_id:?}");
-    state.focus.prefix_saved_focus = None;
+    state.focus.exit(crate::state::FocusOverride::Prefix);
+    state.ime.set_prefix_active(false);
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     keyboard.set_focus(state, target, serial);
 }

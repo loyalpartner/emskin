@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod cursor;
+pub mod dbus;
 pub mod effects;
 pub mod emacs;
 pub mod focus;
@@ -72,31 +73,60 @@ pub enum SelectionOrigin {
     Host,
 }
 
-/// Focus-related state grouped together for clarity.
+/// Kind of focus override currently in effect. Multiple may be active
+/// concurrently (e.g. user Alt+Tab away from emskin while in middle of
+/// an Emacs prefix chord).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FocusOverride {
+    /// Emacs C-x / C-c / M-x chord redirected focus to Emacs.
+    Prefix,
+    /// A layer-shell client (zofi / wofi / rofi) grabbed focus.
+    Layer,
+    /// Emskin's window itself lost host-level focus (Alt+Tab away).
+    Host,
+}
+
+/// Focus-override state — one saved focus per active override kind.
+///
+/// Replaces three independent `Option<KeyboardFocusTarget>` slots with
+/// a typed `enter`/`exit`/`is_active` API so callers don't manipulate
+/// raw fields. Saved focus is itself `Option` because there may not
+/// have been a focused surface at the moment the override fired.
 #[derive(Default)]
 pub struct FocusState {
-    /// Saved keyboard focus before a prefix key redirect (C-x, C-c, M-x).
-    /// `Some(focus)` = prefix active, restore `focus` when done; `None` = normal.
-    pub prefix_saved_focus: Option<Option<crate::KeyboardFocusTarget>>,
-    /// Saved keyboard focus before a layer surface took it.
-    pub layer_saved_focus: Option<crate::KeyboardFocusTarget>,
-    /// Saved keyboard focus when the host window lost focus; restored
-    /// on regain. Prevents embedded clients from thinking they still
-    /// have focus while the user Alt+Tab'd away from emskin.
-    pub host_saved_focus: Option<crate::KeyboardFocusTarget>,
+    saves: std::collections::HashMap<FocusOverride, Option<crate::KeyboardFocusTarget>>,
 }
 
 impl FocusState {
+    /// Save `current` as the focus to restore when this override exits.
+    /// **Always overwrites.** Callers that need idempotence (the
+    /// `prefix_done`-may-be-lost guard in input.rs) must check
+    /// `is_active(kind)` first.
+    pub fn enter(&mut self, kind: FocusOverride, current: Option<crate::KeyboardFocusTarget>) {
+        self.saves.insert(kind, current);
+    }
+
+    /// Exit override; returns saved focus to restore. Outer `Some`
+    /// means the override was active; inner `Option` is the actual
+    /// saved focus (which itself may be `None` if nothing was focused
+    /// when the override fired).
+    pub fn exit(&mut self, kind: FocusOverride) -> Option<Option<crate::KeyboardFocusTarget>> {
+        self.saves.remove(&kind)
+    }
+
+    pub fn is_active(&self, kind: FocusOverride) -> bool {
+        self.saves.contains_key(&kind)
+    }
+
     /// Clear every saved-focus slot. Called on workspace switch: the
     /// saved targets may reference surfaces in the departing workspace,
     /// which become stale the moment `switch_workspace` swaps the
-    /// active `Space`. `on_focus_enter` / prefix restore / layer
-    /// dismissal all read these slots unconditionally and would
-    /// otherwise re-grant focus to a surface that's no longer mapped.
+    /// active `Space`. Without this, an Alt+Tab-away → workspace-switch
+    /// → Alt+Tab-back sequence would restore focus to a surface in the
+    /// now-inactive workspace (sending `wl_keyboard.enter` to an
+    /// unmapped client).
     pub fn reset_on_workspace_switch(&mut self) {
-        self.prefix_saved_focus = None;
-        self.layer_saved_focus = None;
-        self.host_saved_focus = None;
+        self.saves.clear();
     }
 }
 
@@ -216,6 +246,12 @@ pub struct EmskinState {
     /// Screenshot / screen-record state machine. Driven by IPC
     /// (`TakeScreenshot { path }`) and consumed by the winit render loop.
     pub recorder: crate::recording::Recorder,
+
+    /// Bridge to the child `emskin-dbus-proxy` process that rewrites IME
+    /// cursor-position calls for embedded apps. Populated in `main.rs`
+    /// after `init_winit`; stays [`DbusBridge::default`] (inert) if the
+    /// proxy binary is missing or the host has no session bus.
+    pub dbus: dbus::DbusBridge,
 }
 
 impl EmskinState {
@@ -331,6 +367,7 @@ impl EmskinState {
             cursor: cursor::CursorState::default(),
             needs_redraw: true,
             recorder: crate::recording::Recorder::new(),
+            dbus: dbus::DbusBridge::default(),
         })
     }
 
@@ -465,7 +502,7 @@ impl EmskinState {
         // Prefix sequence active: the user is typing C-x ... , any focus
         // steal would break the sequence. Still inform Emacs so its
         // buffer-level "focused window" tracking stays correct.
-        if self.focus.prefix_saved_focus.is_some() {
+        if self.focus.is_active(FocusOverride::Prefix) {
             self.ipc.send(focus_view);
             return;
         }
@@ -838,62 +875,62 @@ impl ClientData for ClientState {
 mod focus_state_tests {
     use super::*;
 
-    // `KeyboardFocusTarget` wraps smithay types (`Window`, `LayerSurface`,
-    // `PopupKind`) that require a live Wayland `Display` + `Client` to
-    // instantiate, so `layer_saved_focus` and `host_saved_focus` can only
-    // be populated via the e2e suite. `prefix_saved_focus` has the
-    // `Option<Option<...>>` shape — `Some(None)` means "prefix sequence
-    // active, no prior focus", a valid sentinel we *can* construct here.
-    // That one exercise is enough to catch the classic "method forgets to
-    // touch a field" bug; the other two slots are covered by
-    // `tests/e2e_*` workspace-switch paths.
+    // KeyboardFocusTarget wraps smithay types that need a live Wayland
+    // Display+Client to construct, so we test with `None` saved-focus
+    // (which is itself a valid sentinel: "override active, nothing was
+    // focused at the moment it fired").
 
     #[test]
-    fn default_is_all_none() {
+    fn default_has_no_active_overrides() {
         let f = FocusState::default();
-        assert!(f.prefix_saved_focus.is_none());
-        assert!(f.layer_saved_focus.is_none());
-        assert!(f.host_saved_focus.is_none());
+        assert!(!f.is_active(FocusOverride::Prefix));
+        assert!(!f.is_active(FocusOverride::Layer));
+        assert!(!f.is_active(FocusOverride::Host));
     }
 
     #[test]
-    fn reset_clears_populated_prefix_saved_focus() {
+    fn enter_then_is_active() {
         let mut f = FocusState::default();
-        f.prefix_saved_focus = Some(None);
-        assert!(f.prefix_saved_focus.is_some(), "precondition");
-
-        f.reset_on_workspace_switch();
-
-        assert!(
-            f.prefix_saved_focus.is_none(),
-            "reset must clear prefix_saved_focus"
-        );
+        f.enter(FocusOverride::Prefix, None);
+        assert!(f.is_active(FocusOverride::Prefix));
+        assert!(!f.is_active(FocusOverride::Layer));
     }
 
     #[test]
-    fn reset_is_idempotent_on_default_state() {
+    fn exit_returns_saved_and_clears() {
         let mut f = FocusState::default();
-        f.reset_on_workspace_switch();
-        assert!(f.prefix_saved_focus.is_none());
-        assert!(f.layer_saved_focus.is_none());
-        assert!(f.host_saved_focus.is_none());
+        f.enter(FocusOverride::Prefix, None);
+        let saved = f.exit(FocusOverride::Prefix);
+        assert_eq!(saved, Some(None), "exit returns the saved Option");
+        assert!(!f.is_active(FocusOverride::Prefix));
     }
 
     #[test]
-    fn reset_clears_every_saved_focus_slot_enumerated() {
-        // Regression guard: a future field added to FocusState and
-        // forgotten in reset_on_workspace_switch will not be caught by
-        // `default_is_all_none` alone. This test enumerates every
-        // currently-existing slot so a reviewer adding a new slot has a
-        // concrete checklist to update here. If you add a field to
-        // FocusState, add its .is_none() assertion below *and* its
-        // corresponding `self.<field> = None` to the method.
+    fn exit_inactive_returns_none() {
         let mut f = FocusState::default();
-        f.prefix_saved_focus = Some(None);
-        f.reset_on_workspace_switch();
+        assert_eq!(f.exit(FocusOverride::Prefix), None);
+    }
 
-        assert!(f.prefix_saved_focus.is_none(), "slot 1: prefix_saved_focus");
-        assert!(f.layer_saved_focus.is_none(), "slot 2: layer_saved_focus");
-        assert!(f.host_saved_focus.is_none(), "slot 3: host_saved_focus");
+    #[test]
+    fn reset_clears_all_overrides() {
+        let mut f = FocusState::default();
+        f.enter(FocusOverride::Prefix, None);
+        f.enter(FocusOverride::Layer, None);
+        f.enter(FocusOverride::Host, None);
+        f.reset_on_workspace_switch();
+        assert!(!f.is_active(FocusOverride::Prefix));
+        assert!(!f.is_active(FocusOverride::Layer));
+        assert!(!f.is_active(FocusOverride::Host));
+    }
+
+    #[test]
+    fn overrides_stack_independently() {
+        let mut f = FocusState::default();
+        f.enter(FocusOverride::Prefix, None);
+        f.enter(FocusOverride::Host, None);
+        // Exit prefix; host stays.
+        f.exit(FocusOverride::Prefix);
+        assert!(!f.is_active(FocusOverride::Prefix));
+        assert!(f.is_active(FocusOverride::Host));
     }
 }

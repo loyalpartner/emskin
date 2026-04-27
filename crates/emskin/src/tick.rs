@@ -1,6 +1,7 @@
 //! Event loop tick — the per-frame idle callback for the compositor.
 
 use smithay::reexports::wayland_server::Resource;
+use smithay::wayland::seat::WaylandFocus;
 
 use crate::ipc::OutgoingMessage;
 use crate::state::EmskinState;
@@ -102,25 +103,71 @@ pub fn event_loop_tick(state: &mut EmskinState) {
         tracing::debug!("embedded app window_id={window_id} geometry force-committed (timeout)");
     }
 
-    // --- Re-evaluate host IME after this tick's Wayland traffic ---
-    // smithay does not expose a callback when a client late-binds or
-    // destroys a `text_input_v3` instance. The decision "should host
-    // IME be allowed?" is a function of (focused surface, focused
-    // client's bound text_input instances) — both of which can change
-    // between focus_changed events.
-    //
-    // Concretely: pgtk Emacs binds text_input *after* its initial
-    // configure, i.e. after the `new_toplevel` keyboard-focus event
-    // fires. The original `on_focus_changed` evaluation gave `false`
-    // because the bind hadn't happened yet, and the answer never got
-    // re-evaluated until the user cycled focus through another app.
-    //
-    // Resync once per tick (after dispatch_clients has processed any
-    // bind/destroy in this batch). Cost is a single uncontested mutex
-    // lock + a tiny instance-list scan; the mailbox is only written
-    // when the answer differs from `last_committed`, so steady state
-    // is silent.
-    state.ime.resync(&state.seat);
+    // Drain broker-observed fcitx5 events and drive winit IME in
+    // emskin-winit-local coords.
+    drain_fcitx_events(state);
+
+    // Poll text_input_v3 cursor freshness — picks up the focused
+    // client's `set_cursor_rectangle` request the moment it lands,
+    // without waiting for a host IME event. Fixes "popup at fallback
+    // (surface origin) until first preedit" for tip-only clients
+    // (Alacritty etc.) whose cursor_rectangle arrives async after
+    // focus.
+    state.ime.poll_tip_freshness(&state.seat, &state.apps);
+}
+
+/// Drain broker-observed fcitx5 events and hand them to the IME
+/// bridge. Each event is translated relative to the currently focused
+/// embedded app's emskin-space origin so the cursor rect reaches
+/// winit in emskin-winit-local coordinates.
+///
+/// Marks `needs_redraw` so the staged `pending_cursor_area` /
+/// `pending_ime_enabled` reach winit within the next render frame
+/// — without this, apply-on-redraw can lag one keystroke behind the
+/// caret if the render loop is idle between input events, and the
+/// candidate popup visibly drifts.
+fn drain_fcitx_events(state: &mut EmskinState) {
+    let Some(broker) = state.dbus.broker.as_mut() else {
+        return;
+    };
+    let events = broker.drain_events();
+    if events.is_empty() {
+        return;
+    }
+    state.needs_redraw = true;
+    let origin = focused_app_origin(state);
+    for event in events {
+        state
+            .ime
+            .on_fcitx_event(event, origin, &state.seat, &state.apps);
+    }
+}
+
+/// Emskin-space origin of the app whose DBus fcitx5 IC is currently
+/// active. Added to the client-reported caret rect to translate it
+/// into emskin-winit-local coordinates before we hand it to winit IME.
+///
+/// - Emacs main surface: origin is `(0, 0)` — Emacs's wl_surface IS
+///   the emskin winit window, so its surface-local caret coords are
+///   already emskin-winit-local.
+/// - Embedded app (xwayland-satellite or Wayland native): origin is
+///   the buffer top-left inside the emskin Space. Subtracts
+///   `geometry().loc` to back out any CSD shadow padding, matching
+///   the convention in `Space::render_location`.
+fn focused_app_origin(state: &EmskinState) -> Option<[i32; 2]> {
+    let kb = state.seat.get_keyboard()?;
+    let focus = kb.current_focus()?;
+    let window = match focus {
+        crate::state::KeyboardFocusTarget::Window(w) => w,
+        _ => return None,
+    };
+    let surface = window.wl_surface()?;
+    if state.emacs.is_main_surface(&surface) {
+        return Some([0, 0]);
+    }
+    let loc = state.workspace.active_space.element_location(&window)?;
+    let geo_offset = window.geometry().loc;
+    Some([loc.x - geo_offset.x, loc.y - geo_offset.y])
 }
 
 fn process_pending_toplevels(state: &mut EmskinState) {

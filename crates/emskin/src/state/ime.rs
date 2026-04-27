@@ -1,114 +1,588 @@
-//! IME (input method) bridge between the host compositor and embedded
-//! Wayland clients via `text_input_v3`.
+//! IME (input method) bridge — unified state machine for both the
+//! text_input_v3 path (Wayland-native clients) and the DBus fcitx5
+//! frontend path (`GTK_IM_MODULE=fcitx` clients).
 //!
-//! Three smithay-imposed constraints drive the design — see
-//! `crates/emskin/CLAUDE.md` → IME for the full "why":
+//! # Mental model
 //!
-//! - `set_ime_allowed` must be toggled per-focused-client (registering `TextInputManagerState` makes fcitx5-gtk abandon its DBus path for text_input_v3, so enabling host IME for a GTK/Qt client that handles its own IM breaks input).
-//! - `text_input.enter()/leave()` must be called by hand from `focus_changed` (smithay gates them on `input_method.has_instance()` and emskin implements no input_method protocol).
-//! - The `set_ime_allowed` decision is deferred via `ime_enabled` + [`ImeBridge::take_ime_enabled`] (`focus_changed` has no access to the winit backend).
+//! At any moment IME has **one owner** — the source currently asking
+//! for IM:
+//!
+//! ```text
+//! enum ImeOwner {
+//!     None,                                  // nobody wants IM
+//!     Tip  { surface }                       // a v3-bound client
+//!     Dbus { conn, ic_path, origin }         // a fcitx5 DBus IC
+//! }
+//! ```
+//!
+//! Plus one **override**: `prefix_active` (Emacs C-x/C-c/M-x chord)
+//! forces IME off so the chord reaches Emacs cleanly.
+//!
+//! Decision is trivial:
+//!
+//! ```text
+//! desired_ime_allowed = !prefix_active && match owner {
+//!     None       => false,
+//!     Tip        => true,                 // fallback area OK
+//!     Dbus       => cursor.is_real,       // wait for client's first SetCursorRect
+//! }
+//! ```
+//!
+//! The DBus gate avoids popup-at-host-(0,0) flicker (text_input_v3.enable
+//! resets state, then we push our cursor; if no cursor, host fcitx5
+//! uses default). For Tip we activate immediately so Ctrl+Space mode
+//! switching works even before the client has reported its caret.
+//!
+//! # Cursor caching
+//!
+//! Per-owner `cursor_cache` (keyed by owner identity) stores the last
+//! client-reported caret in **client-surface-local** coords. Restored
+//! on refocus so e.g. Alacritty → Emacs → Alacritty snaps the popup
+//! back to where it was, instead of flashing through the
+//! surface-origin fallback.
+//!
+//! # Two-sources-of-IME-demand gotcha (preserved)
+//!
+//! Tip and DBus paths are mutually exclusive (one owner at a time).
+//! Conceptually the "OR" of demands is the owner being non-None.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::text_input::{TextInputHandle, TextInputManagerState, TextInputSeat};
 
 use crate::apps::AppManager;
+use crate::dbus_broker::ConnId;
 use crate::EmskinState;
+
+/// Debounce window for `CursorRect` events following a DBus `FocusIn`.
+/// pgtk Emacs's GTK IM module fires a burst of `SetCursorRectV2`
+/// messages on FocusIn, some carrying stale positions before the real
+/// caret coord arrives ~280ms later. The first burst entry is accepted;
+/// the rest are dropped until the settle window closes.
+const FOCUS_IN_CURSOR_RECT_SETTLE: Duration = Duration::from_millis(300);
 
 /// `(-1, -1)` sentinel per text_input_v3 for "no cursor position".
 const NO_CURSOR: (i32, i32) = (-1, -1);
 
+/// Who currently wants IME, if anyone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImeOwner {
+    None,
+    /// Wayland-native text_input_v3 client (Alacritty, Chromium with
+    /// `--enable-wayland-ime`).
+    Tip {
+        surface: WlSurface,
+    },
+    /// fcitx5 DBus client (WeChat, Electron, pgtk Emacs). `origin` is
+    /// the embedded app's emskin-space top-left, captured at FocusIn
+    /// — preserved across cursor events even if keyboard focus drifts.
+    Dbus {
+        conn: ConnId,
+        ic_path: String,
+        origin: [i32; 2],
+    },
+}
+
+/// Cache key derived from owner identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CursorCacheKey {
+    Tip(WlSurface),
+    Dbus(ConnId, String),
+}
+
+impl ImeOwner {
+    /// Same identity (ignoring origin / cosmetic fields)? Used to
+    /// detect "set_owner with the same owner" and skip cache reset.
+    fn same_identity_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::None, Self::None) => true,
+            (Self::Tip { surface: a }, Self::Tip { surface: b }) => a == b,
+            (
+                Self::Dbus {
+                    conn: ac,
+                    ic_path: ap,
+                    ..
+                },
+                Self::Dbus {
+                    conn: bc,
+                    ic_path: bp,
+                    ..
+                },
+            ) => ac == bc && ap == bp,
+            _ => false,
+        }
+    }
+}
+
 pub struct ImeBridge {
+    /// Currently keyboard-focused Wayland surface (independent of IME
+    /// ownership — needed for text_input enter/leave plumbing even
+    /// when no client wants IME).
     focused_surface: Option<WlSurface>,
-    /// Host IME enabled/disabled decision waiting for the render loop
-    /// to apply via `set_ime_allowed`. Drained by `take_ime_enabled`
-    /// (write-once, read-once semantic — the `Option` distinguishes
-    /// "no change to apply" from "apply false").
-    ime_enabled: Option<bool>,
-    /// Last value `take_ime_enabled` returned (i.e. last value the
-    /// winit backend was told). Used by [`Self::resync`] to suppress
-    /// no-op re-evaluations: tick-driven re-derivation is a hot path,
-    /// and we only want to write the mailbox when the answer differs
-    /// from what's already committed downstream.
-    last_committed: Option<bool>,
+
+    /// Who currently wants IME.
+    owner: ImeOwner,
+
+    /// Caret area in **emskin-winit-local** coords (already translated
+    /// from client-surface-local by the owner's origin). `None` =
+    /// owner is None or we haven't been able to compute one.
+    cursor: Option<([i32; 2], [i32; 2])>,
+
+    /// True iff `cursor` is from a real client report (not the
+    /// surface-origin fallback). Used to gate `desired_ime_allowed`
+    /// for the DBus path so we don't flicker popup at (0, 0) before
+    /// the client's first SetCursorRect lands.
+    cursor_is_real: bool,
+
+    /// Per-owner cache of the last accepted client-local rect.
+    /// Restored on refocus to a known owner.
+    cursor_cache: HashMap<CursorCacheKey, Rectangle<i32, Logical>>,
+
+    /// Tip-path: snapshot of `ti.cursor_rectangle()` taken at the
+    /// moment we became Tip-owned. `TextInputHandle.cursor_rectangle`
+    /// is per-seat (not per-surface), so when client A sets it then
+    /// loses focus, client B inherits A's value. We treat ti's value
+    /// as fresh only when it differs from this snapshot.
+    tip_snapshot: Option<Rectangle<i32, Logical>>,
+
+    /// DBus-path: when the current Dbus owner was set. Used to
+    /// debounce GTK fcitx-gtk's post-FocusIn CursorRect burst.
+    dbus_focused_at: Option<Instant>,
+
+    /// DBus-path: have we accepted a CursorRect for the current
+    /// Dbus owner yet? First one bypasses the settle window;
+    /// subsequent ones inside the window are dropped.
+    dbus_cursor_received: bool,
+
+    /// Override: Emacs prefix chord (C-x/C-c/M-x) forces IME off so
+    /// continuation keys reach Emacs and any half-typed preedit is
+    /// cancelled.
+    prefix_active: bool,
+
+    /// What we last told winit via `set_ime_allowed`.
+    last_applied_ime_allowed: bool,
+    /// What we last told winit via `set_ime_cursor_area`.
+    last_applied_cursor_area: Option<([i32; 2], [i32; 2])>,
 }
 
 impl ImeBridge {
     pub fn new(dh: &DisplayHandle) -> Self {
-        // The global is owned by `Display` after registration; the
-        // returned `TextInputManagerState` (a bare `GlobalId` wrapper)
-        // has no Drop impl that unregisters, so dropping it is a no-op.
+        // Global registration; the returned wrapper has no Drop, so
+        // dropping it is a no-op.
         let _ = TextInputManagerState::new::<EmskinState>(dh);
         Self {
             focused_surface: None,
-            ime_enabled: None,
-            last_committed: None,
+            owner: ImeOwner::None,
+            cursor: None,
+            cursor_is_real: false,
+            cursor_cache: HashMap::new(),
+            tip_snapshot: None,
+            dbus_focused_at: None,
+            dbus_cursor_received: false,
+            prefix_active: false,
+            last_applied_ime_allowed: false,
+            last_applied_cursor_area: None,
         }
     }
 
-    /// Bridge text_input enter/leave on keyboard focus change and queue
-    /// a re-evaluation of host IME for the new focus.
+    /// Public read-only view of the currently-active DBus IC, for
+    /// `winit.rs` to route `Ime::Preedit` / `Ime::Commit` events back
+    /// over the DBus broker.
+    pub fn active_dbus_ic(&self) -> Option<(ConnId, &str)> {
+        match &self.owner {
+            ImeOwner::Dbus { conn, ic_path, .. } => Some((*conn, ic_path.as_str())),
+            _ => None,
+        }
+    }
+
+    fn desired_ime_allowed(&self) -> bool {
+        if self.prefix_active {
+            return false;
+        }
+        match &self.owner {
+            ImeOwner::None => false,
+            // Tip activates immediately — Ctrl+Space toggling needs
+            // host fcitx5 to grab keys even before the client reports
+            // its caret. Cursor area uses fallback (surface origin)
+            // until the client sends a fresh value.
+            ImeOwner::Tip { .. } => true,
+            // DBus waits for the client's first SetCursorRect — GTK
+            // fcitx-gtk reliably sends within 1-2 frames of FocusIn.
+            // Without this gate, the popup would flicker at host (0, 0)
+            // (text_input_v3.enable resets cursor state to default).
+            ImeOwner::Dbus { .. } => self.cursor_is_real,
+        }
+    }
+
+    fn desired_cursor_area(&self) -> Option<([i32; 2], [i32; 2])> {
+        self.cursor
+    }
+
+    /// Sync state to winit. Called from the render loop.
     ///
-    /// `new_focus` is the focused surface projected from
-    /// `KeyboardFocusTarget` via `WaylandFocus::wl_surface()` — X clients
-    /// surface here too once associated by xwayland-satellite.
-    pub fn on_focus_changed(&mut self, seat: &Seat<EmskinState>, new_focus: Option<WlSurface>) {
+    /// Order matters: `set_ime_allowed(true)` MUST come before
+    /// `set_ime_cursor_area`, because `text_input_v3.enable` resets
+    /// state — pushing the cursor first would have it wiped by enable.
+    /// On activation (off → on) we force-push cursor even if value
+    /// hasn't changed, so it lands after enable's reset.
+    pub fn sync_to_winit(&mut self, window: &winit_crate::window::Window) {
+        let want_allowed = self.desired_ime_allowed();
+        let activating = want_allowed && !self.last_applied_ime_allowed;
+
+        if want_allowed != self.last_applied_ime_allowed {
+            window.set_ime_allowed(want_allowed);
+            tracing::info!("winit.set_ime_allowed({want_allowed})");
+            self.last_applied_ime_allowed = want_allowed;
+        }
+
+        if let Some((pos, size)) = self.desired_cursor_area() {
+            let changed = self.last_applied_cursor_area != Some((pos, size));
+            if changed || activating {
+                window.set_ime_cursor_area(
+                    winit_crate::dpi::LogicalPosition::new(pos[0] as f64, pos[1] as f64),
+                    winit_crate::dpi::LogicalSize::new(size[0] as f64, size[1] as f64),
+                );
+                tracing::info!(
+                    reason = if activating { "activating" } else { "changed" },
+                    "winit.set_ime_cursor_area({}, {}, {}, {})",
+                    pos[0],
+                    pos[1],
+                    size[0],
+                    size[1]
+                );
+                self.last_applied_cursor_area = Some((pos, size));
+            }
+        }
+    }
+
+    // ----- Owner transitions -----
+
+    fn set_owner(&mut self, new: ImeOwner, ti: &TextInputHandle, apps: &AppManager) {
+        // No-op if same identity (e.g. set_focus(SAME) from C-x b/o IPC).
+        if self.owner.same_identity_as(&new) {
+            return;
+        }
+        self.owner = new;
+        self.cursor = None;
+        self.cursor_is_real = false;
+        self.tip_snapshot = None;
+        self.dbus_focused_at = None;
+        self.dbus_cursor_received = false;
+
+        match self.owner.clone() {
+            ImeOwner::None => {}
+            ImeOwner::Tip { ref surface } => {
+                self.tip_snapshot = ti.cursor_rectangle();
+                // Try cache first; fall back to surface origin.
+                let cached = self
+                    .cursor_cache
+                    .get(&CursorCacheKey::Tip(surface.clone()))
+                    .copied();
+                if let Some(rect) = cached {
+                    self.cursor = Some(translate(rect, app_loc(Some(surface), apps)));
+                    self.cursor_is_real = true;
+                } else {
+                    self.cursor = Some((app_loc(Some(surface), apps), [1, 1]));
+                    // cursor_is_real stays false — fallback only.
+                }
+            }
+            ImeOwner::Dbus {
+                ref conn,
+                ref ic_path,
+                origin,
+            } => {
+                self.dbus_focused_at = Some(Instant::now());
+                let cached = self
+                    .cursor_cache
+                    .get(&CursorCacheKey::Dbus(*conn, ic_path.clone()))
+                    .copied();
+                if let Some(rect) = cached {
+                    self.cursor = Some((
+                        [origin[0] + rect.loc.x, origin[1] + rect.loc.y],
+                        [rect.size.w.max(1), rect.size.h.max(1)],
+                    ));
+                    self.cursor_is_real = true;
+                    // First real CursorRect from client should still
+                    // bypass the debounce, so don't flip
+                    // `dbus_cursor_received` based on cache alone.
+                }
+                // No fallback for Dbus — desired_ime_allowed gates on
+                // cursor_is_real, so popup stays hidden until first
+                // real SetCursorRect arrives.
+            }
+        }
+    }
+
+    fn clear_owner(&mut self) {
+        if matches!(self.owner, ImeOwner::None) {
+            return;
+        }
+        self.owner = ImeOwner::None;
+        self.cursor = None;
+        self.cursor_is_real = false;
+        self.tip_snapshot = None;
+        self.dbus_focused_at = None;
+        self.dbus_cursor_received = false;
+    }
+
+    // ----- Cursor reports -----
+
+    fn report_dbus_cursor(&mut self, conn: ConnId, ic_path: &str, rect: [i32; 4]) {
+        let ImeOwner::Dbus {
+            conn: oc,
+            ic_path: oi,
+            origin,
+        } = &self.owner
+        else {
+            tracing::debug!(?conn, ?ic_path, "CursorRect ignored: no DBus owner");
+            return;
+        };
+        if *oc != conn || oi != ic_path {
+            tracing::debug!(
+                ?conn,
+                ?ic_path,
+                active_conn = ?oc,
+                active_ic = oi,
+                "CursorRect ignored: not the active IC"
+            );
+            return;
+        }
+        // Debounce GTK IM's post-FocusIn burst.
+        let in_settle = self
+            .dbus_focused_at
+            .map(|t| t.elapsed() < FOCUS_IN_CURSOR_RECT_SETTLE)
+            .unwrap_or(false);
+        if self.dbus_cursor_received && in_settle {
+            tracing::debug!(
+                ?conn,
+                ?ic_path,
+                client_rect = ?rect,
+                "CursorRect debounced: within FocusIn settle window"
+            );
+            return;
+        }
+        let area = (
+            [origin[0] + rect[0], origin[1] + rect[1]],
+            [rect[2].max(1), rect[3].max(1)],
+        );
+        tracing::info!(
+            ?conn,
+            ?ic_path,
+            client_rect = ?rect,
+            origin = ?origin,
+            "DBus CursorRect → updating cursor"
+        );
+        self.cursor = Some(area);
+        self.cursor_is_real = true;
+        self.dbus_cursor_received = true;
+        // Cache as a Rectangle for symmetry with tip cache.
+        self.cursor_cache.insert(
+            CursorCacheKey::Dbus(conn, ic_path.to_string()),
+            Rectangle::new((rect[0], rect[1]).into(), (rect[2], rect[3]).into()),
+        );
+    }
+
+    fn report_tip_cursor_change(&mut self, ti: &TextInputHandle, apps: &AppManager) {
+        let ImeOwner::Tip { surface } = &self.owner else {
+            return;
+        };
+        let Some(current) = ti.cursor_rectangle() else {
+            return;
+        };
+        if Some(current) == self.tip_snapshot {
+            return; // no change vs snapshot
+        }
+        tracing::debug!(
+            ?current,
+            snapshot = ?self.tip_snapshot,
+            "tip cursor_rectangle update"
+        );
+        self.tip_snapshot = Some(current);
+        let surface = surface.clone();
+        self.cursor = Some(translate(current, app_loc(Some(&surface), apps)));
+        self.cursor_is_real = true;
+        self.cursor_cache
+            .insert(CursorCacheKey::Tip(surface), current);
+    }
+
+    /// Per-tick reconciliation of tip-path state.
+    ///
+    /// 1. **Late binding upgrade**: clients like Alacritty bind
+    ///    `text_input_v3` lazily — sometimes after our `on_focus_changed`
+    ///    has already run with `focused_client_has_text_input == false`.
+    ///    Without re-checking, owner stays `None` forever and Ctrl+Space
+    ///    can't toggle IME on a freshly-focused tip client. So every
+    ///    tick: if the focused surface now has a v3 binding and we
+    ///    aren't already Tip-owned for it (and aren't Dbus-owned —
+    ///    Dbus has its own event-driven channel), upgrade.
+    ///
+    /// 2. **Cursor freshness**: when Tip-owned, picks up the client's
+    ///    `set_cursor_rectangle` requests within ≤ 1 frame even when
+    ///    no host IME event fires.
+    pub fn poll_tip_freshness(&mut self, seat: &Seat<EmskinState>, apps: &AppManager) {
+        let ti = seat.text_input();
+        // 1. Late-bind upgrade: owner None and focused surface now has tip.
+        if matches!(self.owner, ImeOwner::None) {
+            if let Some(surface) = self.focused_surface.clone() {
+                if focused_client_has_text_input(ti) {
+                    tracing::debug!("late tip binding detected → upgrading owner to Tip");
+                    self.set_owner(ImeOwner::Tip { surface }, ti, apps);
+                }
+            }
+        }
+        // 2. Cursor change for current Tip owner.
+        if matches!(self.owner, ImeOwner::Tip { .. }) {
+            self.report_tip_cursor_change(ti, apps);
+        }
+    }
+
+    // ----- Override -----
+
+    /// Mark the start / end of an Emacs prefix chord.
+    pub fn set_prefix_active(&mut self, active: bool) {
+        if self.prefix_active != active {
+            tracing::debug!(active, "IME: prefix_active toggled");
+            self.prefix_active = active;
+        }
+    }
+
+    // ----- Reset -----
+
+    pub fn reset_on_workspace_switch(&mut self) {
+        tracing::debug!("IME: reset on workspace switch");
+        self.focused_surface = None;
+        self.owner = ImeOwner::None;
+        self.cursor = None;
+        self.cursor_is_real = false;
+        self.tip_snapshot = None;
+        self.dbus_focused_at = None;
+        self.dbus_cursor_received = false;
+        // Caches reference now-inactive workspace's surfaces; clear
+        // both so a new-workspace FocusIn doesn't replay a rect from
+        // an unrelated app.
+        self.cursor_cache.clear();
+        self.prefix_active = false;
+        // Don't reset `last_applied_*` — next sync_to_winit diffs.
+    }
+
+    // ----- Event entry points -----
+
+    /// Process a fcitx event from the DBus broker.
+    pub fn on_fcitx_event(
+        &mut self,
+        event: crate::dbus_broker::FcitxEvent,
+        app_origin: Option<[i32; 2]>,
+        seat: &Seat<EmskinState>,
+        apps: &AppManager,
+    ) {
+        use crate::dbus_broker::FcitxEvent;
+
+        match event {
+            FcitxEvent::FocusChanged {
+                conn,
+                ic_path,
+                focused: true,
+            } => {
+                let origin = app_origin.unwrap_or([0, 0]);
+                tracing::info!(?conn, ?ic_path, ?origin, "fcitx IC FocusIn → DBus owner");
+                let ti = seat.text_input();
+                self.set_owner(
+                    ImeOwner::Dbus {
+                        conn,
+                        ic_path,
+                        origin,
+                    },
+                    ti,
+                    apps,
+                );
+            }
+            FcitxEvent::FocusChanged {
+                conn,
+                ic_path,
+                focused: false,
+            } => {
+                if let ImeOwner::Dbus {
+                    conn: oc,
+                    ic_path: oi,
+                    ..
+                } = &self.owner
+                {
+                    if *oc == conn && oi == &ic_path {
+                        tracing::debug!(?conn, ?ic_path, "fcitx IC FocusOut → clearing owner");
+                        self.clear_owner();
+                    }
+                }
+            }
+            FcitxEvent::CursorRect {
+                conn,
+                ic_path,
+                rect,
+            } => {
+                self.report_dbus_cursor(conn, &ic_path, rect);
+            }
+            FcitxEvent::IcDestroyed { conn, ic_path } => {
+                if let ImeOwner::Dbus {
+                    conn: oc,
+                    ic_path: oi,
+                    ..
+                } = &self.owner
+                {
+                    if *oc == conn && oi == &ic_path {
+                        self.clear_owner();
+                    }
+                }
+                self.cursor_cache
+                    .remove(&CursorCacheKey::Dbus(conn, ic_path));
+            }
+        }
+    }
+
+    /// Bridge keyboard focus change. Updates `focused_surface` for
+    /// text_input enter/leave plumbing. The DBus owner is independent
+    /// of keyboard focus (driven by FcitxEvent::FocusChanged); we
+    /// only update Tip ownership here.
+    pub fn on_focus_changed(
+        &mut self,
+        seat: &Seat<EmskinState>,
+        new_focus: Option<WlSurface>,
+        apps: &AppManager,
+    ) {
         let ti = seat.text_input();
         let old = self.focused_surface.take();
         transition_focus(ti, old, &new_focus);
-        tracing::debug!("IME focus_changed: has_focus={}", new_focus.is_some());
-        self.focused_surface = new_focus;
-        self.resync(seat);
+        self.focused_surface = new_focus.clone();
+
+        // Decide Tip ownership based on the new focus. DBus ownership
+        // is independent (driven by FcitxEvent::FocusChanged); the
+        // embedded client's GTK IM module sends FocusOut over DBus
+        // when keyboard focus moves away, which clears the DBus owner
+        // separately.
+        let new_owner = match new_focus {
+            Some(surface) if focused_client_has_text_input(ti) => ImeOwner::Tip { surface },
+            _ => ImeOwner::None,
+        };
+        self.set_owner(new_owner, ti, apps);
     }
 
-    /// Re-derive "should host IME be allowed" from the seat's current
-    /// text_input state and queue an update if the answer changed since
-    /// the last winit commit.
-    ///
-    /// **Why this exists**: the answer is a function of (focused
-    /// surface, focused client's bound text_input instances). It can
-    /// change in three ways:
-    ///
-    /// 1. focus moves to a different surface — handled by
-    ///    [`Self::on_focus_changed`]
-    /// 2. the focused client late-binds `text_input_v3` (pgtk Emacs
-    ///    binds *after* its initial configure, i.e. after the
-    ///    `new_toplevel` keyboard-focus event runs)
-    /// 3. the focused client destroys its text_input instance
-    ///
-    /// (2) and (3) have no smithay callback. To catch them we resync
-    /// once per event-loop tick (after `dispatch_clients` has had a
-    /// chance to process new bind / destroy requests). Cheap: an
-    /// in-process probe + an `Option<bool>` compare; only writes the
-    /// mailbox when the answer actually differs.
-    pub fn resync(&mut self, seat: &Seat<EmskinState>) {
-        self.resync_from_handle(seat.text_input());
-    }
-
-    /// Inner re-evaluation against a raw [`TextInputHandle`]. Split out
-    /// so unit tests can drive the state machine without building a
-    /// full `Seat`. Production callers go through [`Self::resync`].
-    fn resync_from_handle(&mut self, ti: &TextInputHandle) {
-        let want = focused_client_has_text_input(ti);
-        if self.last_committed != Some(want) {
-            self.ime_enabled = Some(want);
-        }
-    }
-
-    /// Forward a host IME event to the focused text_input_v3 client and
-    /// reposition the host IME popup to follow the client's caret.
+    /// Forward a host IME event to the focused text_input_v3 client.
+    /// DBus path is handled by the broker's `emit_commit_string` /
+    /// `emit_preedit` (called from winit.rs::WinitEvent::Ime).
     pub fn on_host_ime_event(
         &mut self,
         event: winit_crate::event::Ime,
         seat: &Seat<EmskinState>,
         apps: &AppManager,
-        window: &winit_crate::window::Window,
+        _window: &winit_crate::window::Window,
     ) {
         use winit_crate::event::Ime;
 
         let ti = seat.text_input();
-        sync_ime_cursor_area(ti, apps, window);
+        self.report_tip_cursor_change(ti, apps);
 
         match event {
             Ime::Enabled => {
@@ -146,40 +620,33 @@ impl ImeBridge {
             }
         }
     }
+}
 
-    /// Drain the deferred `set_ime_allowed` decision, if any. Called
-    /// from the winit render loop where the backend is accessible.
-    /// Records the drained value in `last_committed` so future
-    /// [`Self::resync`] calls can suppress no-op writes.
-    pub fn take_ime_enabled(&mut self) -> Option<bool> {
-        let taken = self.ime_enabled.take();
-        if let Some(enabled) = taken {
-            tracing::debug!("IME: applying set_ime_allowed({enabled})");
-            self.last_committed = Some(enabled);
-        }
-        taken
-    }
+// ---------------- helpers ----------------
 
-    /// Clear state on workspace switch — stale surface refs would
-    /// otherwise route text_input events to the wrong client. Forces
-    /// host IME off during the switch transient; the next
-    /// [`Self::on_focus_changed`] / [`Self::resync`] will re-enable it
-    /// if the incoming focus has text_input_v3 bound.
-    pub fn reset_on_workspace_switch(&mut self) {
-        tracing::debug!("IME: reset on workspace switch");
-        self.focused_surface = None;
-        if self.last_committed != Some(false) {
-            self.ime_enabled = Some(false);
-        }
-    }
+/// App-space top-left of `surface`, falling back to (0, 0) when not
+/// tracked (e.g. Emacs main surface, which IS the winit window).
+fn app_loc(surface: Option<&WlSurface>, apps: &AppManager) -> [i32; 2] {
+    surface
+        .and_then(|s| apps.surface_geometry(s))
+        .map(|g| [g.loc.x, g.loc.y])
+        .unwrap_or([0, 0])
+}
+
+/// Translate a client-surface-local rect into emskin-winit-local
+/// `(position, size)`.
+fn translate(rect: Rectangle<i32, Logical>, app_loc: [i32; 2]) -> ([i32; 2], [i32; 2]) {
+    (
+        [app_loc[0] + rect.loc.x, app_loc[1] + rect.loc.y],
+        [rect.size.w.max(1), rect.size.h.max(1)],
+    )
 }
 
 /// Update smithay's text_input focus and fire enter/leave at the right
-/// clients. smithay's keyboard handler would do this automatically if
-/// we had an input_method protocol registered, but we don't — hence
-/// the manual dance. The `leave` event must be sent *while* text_input
-/// focus still points at `old`, otherwise smithay routes it to the new
-/// surface instead of the departing one.
+/// clients. smithay would do this automatically with an input_method
+/// protocol registered, but we don't — hence the manual dance. The
+/// `leave` event must be sent *while* text_input focus still points at
+/// `old`, otherwise smithay routes it to the new surface instead.
 fn transition_focus(ti: &TextInputHandle, old: Option<WlSurface>, new: &Option<WlSurface>) {
     if old.as_ref() == new.as_ref() {
         return;
@@ -207,144 +674,51 @@ fn focused_client_has_text_input(ti: &TextInputHandle) -> bool {
     found
 }
 
-/// Position the host IME popup on the embedded client's caret.
-fn sync_ime_cursor_area(
-    ti: &TextInputHandle,
-    apps: &AppManager,
-    window: &winit_crate::window::Window,
-) {
-    let Some(rect) = ti.cursor_rectangle() else {
-        return;
-    };
-    // cursor_rectangle is surface-local; offset by the embedded app's
-    // compositor-space origin so the popup lands on-screen.
-    let app_loc = ti
-        .focus()
-        .and_then(|surface| apps.surface_geometry(&surface))
-        .map(|geo| geo.loc)
-        .unwrap_or_default();
-    window.set_ime_cursor_area(
-        winit_crate::dpi::LogicalPosition::new(
-            (rect.loc.x + app_loc.x) as f64,
-            (rect.loc.y + app_loc.y) as f64,
-        ),
-        winit_crate::dpi::LogicalSize::new(rect.size.w as f64, rect.size.h as f64),
-    );
-}
-
 smithay::delegate_text_input_manager!(EmskinState);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smithay::wayland::text_input::TextInputHandle;
 
-    /// Build an `ImeBridge` without going through `new` (which needs a
-    /// live `DisplayHandle`). The tests below only exercise the
-    /// mailbox / committed-cache state machine, which is independent
-    /// of the smithay registration in `new`.
-    fn fresh_bridge() -> ImeBridge {
-        ImeBridge {
-            focused_surface: None,
-            ime_enabled: None,
-            last_committed: None,
-        }
-    }
-
-    /// A default `TextInputHandle` has no instances, so
-    /// `with_focused_text_input` never fires its callback ⇒
-    /// `focused_client_has_text_input` returns `false`. Sufficient to
-    /// exercise the "no client text_input bound" branch of resync,
-    /// which is the exact production scenario the bug appears in.
-    fn empty_handle() -> TextInputHandle {
-        TextInputHandle::default()
+    #[test]
+    fn cache_key_dbus_distinguishes_conn_and_ic() {
+        let a = CursorCacheKey::Dbus(ConnId::new_for_test(1), "/ic/1".into());
+        let b = CursorCacheKey::Dbus(ConnId::new_for_test(1), "/ic/2".into());
+        let c = CursorCacheKey::Dbus(ConnId::new_for_test(2), "/ic/1".into());
+        assert_ne!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]
-    fn resync_first_call_writes_disable_into_mailbox() {
-        let mut bridge = fresh_bridge();
-        bridge.resync_from_handle(&empty_handle());
-        assert_eq!(bridge.ime_enabled, Some(false));
-    }
-
-    #[test]
-    fn take_ime_enabled_records_last_committed() {
-        let mut bridge = fresh_bridge();
-        bridge.resync_from_handle(&empty_handle());
-        let taken = bridge.take_ime_enabled();
-        assert_eq!(taken, Some(false));
-        assert_eq!(bridge.last_committed, Some(false));
-        assert!(bridge.ime_enabled.is_none(), "mailbox drained");
-    }
-
-    #[test]
-    fn resync_is_silent_when_answer_matches_last_committed() {
-        // Regression guard for the "polled per tick" property: if the
-        // derived answer hasn't changed since winit committed it, no
-        // mailbox write happens, no spurious `set_ime_allowed` syscall.
-        let mut bridge = fresh_bridge();
-        bridge.resync_from_handle(&empty_handle());
-        bridge.take_ime_enabled(); // commits Some(false)
-
-        bridge.resync_from_handle(&empty_handle()); // same answer
+    fn ime_owner_same_identity_dbus_ignores_origin() {
+        let a = ImeOwner::Dbus {
+            conn: ConnId::new_for_test(1),
+            ic_path: "/ic/1".into(),
+            origin: [10, 20],
+        };
+        let b = ImeOwner::Dbus {
+            conn: ConnId::new_for_test(1),
+            ic_path: "/ic/1".into(),
+            origin: [99, 99],
+        };
         assert!(
-            bridge.ime_enabled.is_none(),
-            "resync must not re-queue when last_committed already matches"
+            a.same_identity_as(&b),
+            "same conn + ic_path = same identity"
         );
     }
 
     #[test]
-    fn resync_overwrites_undrained_mailbox_when_value_unchanged() {
-        // Edge case: two ticks in a row with no take in between, both
-        // see `false`. The mailbox holds `Some(false)` after tick 1.
-        // Tick 2's resync sees `last_committed = None` (never drained),
-        // so the answer "differs" from the cache → mailbox stays at
-        // `Some(false)`. Idempotent.
-        let mut bridge = fresh_bridge();
-        bridge.resync_from_handle(&empty_handle());
-        assert_eq!(bridge.ime_enabled, Some(false));
-        bridge.resync_from_handle(&empty_handle());
-        assert_eq!(
-            bridge.ime_enabled,
-            Some(false),
-            "second resync without intervening take is idempotent"
-        );
-    }
-
-    #[test]
-    fn reset_on_workspace_switch_queues_disable_when_last_was_enabled() {
-        // Workspace switch must force host IME off so a pre-existing
-        // `set_ime_allowed(true)` doesn't leak across the boundary.
-        let mut bridge = fresh_bridge();
-        bridge.last_committed = Some(true); // simulate prior IME-on workspace
-        bridge.reset_on_workspace_switch();
-        assert_eq!(bridge.ime_enabled, Some(false));
-    }
-
-    #[test]
-    fn reset_on_workspace_switch_is_silent_when_already_disabled() {
-        // If the previous workspace already had IME off, the reset
-        // must not queue a redundant winit `set_ime_allowed(false)`.
-        let mut bridge = fresh_bridge();
-        bridge.last_committed = Some(false);
-        bridge.reset_on_workspace_switch();
-        assert!(
-            bridge.ime_enabled.is_none(),
-            "no redundant winit syscall when workspace switch doesn't change IME state"
-        );
-    }
-
-    #[test]
-    fn reset_clears_focused_surface_regardless_of_ime_state() {
-        // The focused-surface clearing path is the legacy correctness
-        // requirement (avoid stale text_input routing); guard it
-        // doesn't regress when `last_committed` short-circuits the IME
-        // mailbox write.
-        let mut bridge = fresh_bridge();
-        bridge.last_committed = Some(false);
-        // Can't easily set focused_surface to a real WlSurface in a
-        // unit test, but reset must leave it as None either way.
-        bridge.reset_on_workspace_switch();
-        assert!(bridge.focused_surface.is_none());
+    fn ime_owner_same_identity_dbus_distinguishes_ic_path() {
+        let a = ImeOwner::Dbus {
+            conn: ConnId::new_for_test(1),
+            ic_path: "/ic/1".into(),
+            origin: [0, 0],
+        };
+        let b = ImeOwner::Dbus {
+            conn: ConnId::new_for_test(1),
+            ic_path: "/ic/2".into(),
+            origin: [0, 0],
+        };
+        assert!(!a.same_identity_as(&b));
     }
 }

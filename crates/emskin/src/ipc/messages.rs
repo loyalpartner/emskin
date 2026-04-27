@@ -25,8 +25,13 @@ pub enum IncomingMessage {
         window_id: u64,
         visible: bool,
     },
-    /// Emacs finished processing a prefix key sequence; restore app focus.
+    /// Emacs finished processing a prefix key sequence in an EAF
+    /// buffer; clear `prefix_active` AND restore the saved app focus.
     PrefixDone,
+    /// Emacs finished any command (global hook); only clear
+    /// `prefix_active` so host IME can resume — focus is left
+    /// wherever Emacs's prefix command put it.
+    PrefixClear,
     AddMirror {
         window_id: u64,
         view_id: u64,

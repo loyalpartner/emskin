@@ -37,7 +37,7 @@ impl SeatHandler for EmskinState {
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
 
-        self.ime.on_focus_changed(seat, focused_wl);
+        self.ime.on_focus_changed(seat, focused_wl, &self.apps);
     }
 }
 

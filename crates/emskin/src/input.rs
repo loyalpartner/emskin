@@ -54,14 +54,21 @@ impl EmskinState {
                 );
 
                 if is_prefix {
-                    // Save original focus only once per prefix sequence.
-                    // If prefix_saved_focus is already set (stale from a
-                    // previous sequence whose prefix_done was lost), we
-                    // still redirect to Emacs — otherwise the user gets
-                    // stuck unable to use any prefix key.
-                    if self.focus.prefix_saved_focus.is_none() {
-                        self.focus.prefix_saved_focus = Some(keyboard.current_focus());
+                    // Save original focus only on first key of a chord.
+                    // If still active from a previous sequence whose
+                    // `prefix_done` was lost, we redirect to Emacs anyway
+                    // (otherwise the user gets stuck) but don't overwrite
+                    // the older saved focus.
+                    if !self.focus.is_active(crate::state::FocusOverride::Prefix) {
+                        self.focus.enter(
+                            crate::state::FocusOverride::Prefix,
+                            keyboard.current_focus(),
+                        );
                     }
+                    // Suspend host IME for the duration of the chord —
+                    // see `ImeBridge::set_prefix_active`. Cleared on
+                    // `prefix_done` IPC.
+                    self.ime.set_prefix_active(true);
                     if let Some(emacs) = self.emacs_focus_target() {
                         if keyboard.current_focus().as_ref() != Some(&emacs) {
                             keyboard.set_focus(self, Some(emacs), SERIAL_COUNTER.next_serial());
@@ -320,7 +327,10 @@ impl EmskinState {
                     });
                     if !same_client {
                         keyboard.set_focus(self, focus, serial);
-                        self.focus.prefix_saved_focus = None;
+                        self.focus.exit(crate::state::FocusOverride::Prefix);
+                        // Mouse-click cancels any in-flight prefix
+                        // chord — must also re-enable host IME.
+                        self.ime.set_prefix_active(false);
                     }
                 }
 
@@ -391,7 +401,8 @@ impl EmskinState {
     pub fn on_focus_leave(&mut self) {
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(keyboard) = self.seat.get_keyboard() {
-            self.focus.host_saved_focus = keyboard.current_focus();
+            self.focus
+                .enter(crate::state::FocusOverride::Host, keyboard.current_focus());
             keyboard.set_focus(self, None, serial);
         }
         if let Some(pointer) = self.seat.get_pointer() {
@@ -416,7 +427,7 @@ impl EmskinState {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
-        let Some(saved) = self.focus.host_saved_focus.take() else {
+        let Some(Some(saved)) = self.focus.exit(crate::state::FocusOverride::Host) else {
             return;
         };
         let serial = SERIAL_COUNTER.next_serial();

@@ -100,6 +100,13 @@ rather than assuming the elisp toggle is the single source of truth."
       (setq-local right-margin-width 0)
       (setq-local cursor-type nil)
       (add-hook 'kill-buffer-hook #'emskin--kill-buffer-hook nil t)
+      ;; Buffer-local: only fires when the user is STILL on this EAF
+      ;; buffer after the prefix command. That's the right time to ask
+      ;; the compositor to restore keyboard focus to the embedded app.
+      ;; If the prefix command (e.g. C-x b) switches to a different
+      ;; buffer, post-command-hook fires for THAT buffer instead — the
+      ;; global `prefix_clear' hook below picks up the IME-state-only
+      ;; cleanup without bouncing focus back to the now-hidden EAF.
       (add-hook 'post-command-hook #'emskin--post-command-prefix-done nil t))
     (let ((target (emskin--take-native-app-target-window)))
       (if target
@@ -177,10 +184,31 @@ VIEW-ID 0 means the source window; otherwise look up the mirror alist."
                         (window_id . ,emskin--window-id)))))
 
 (defun emskin--post-command-prefix-done ()
-  "After a command completes in an EAF buffer, signal the compositor.
-The compositor only acts if it previously redirected focus for a prefix key."
+  "After a command completes IN AN EAF BUFFER, ask the compositor to
+restore keyboard focus to the embedded app (clearing prefix state
+along the way). Registered buffer-locally — only fires when the
+post-command tick runs while the EAF buffer is still current."
   (when emskin--process
     (emskin--send '((type . "prefix_done")))))
+
+(defun emskin--post-command-prefix-clear ()
+  "Clear the compositor's `prefix_active' flag after every Emacs
+command, in any buffer.
+
+emskin disables host IME for the duration of an Emacs prefix chord
+(C-x ...) so the chord doesn't get eaten by fcitx5. Without a global
+clear, plain Emacs chords like `C-x b' (which switch to a non-EAF
+buffer, so the buffer-local `prefix_done' hook above doesn't fire)
+would leave host IME disabled until the user clicks out and back.
+
+Unlike `prefix_done', this signal does NOT restore focus — focus
+follows whatever Emacs's prefix command did. The IPC handler is a
+no-op when no prefix is active, so per-command firing is cheap."
+  (when emskin--process
+    (emskin--send '((type . "prefix_clear")))))
+
+;; Global registration of the IME-only cleanup. Idempotent.
+(add-hook 'post-command-hook #'emskin--post-command-prefix-clear)
 
 ;; ---------------------------------------------------------------------------
 ;; Geometry reporting

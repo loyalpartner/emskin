@@ -57,9 +57,12 @@ fn apply_pending_state(state: &mut EmskinState, backend: &mut WinitGraphicsBacke
         backend.window().set_maximized(maximize);
     }
 
-    if let Some(enabled) = state.ime.take_ime_enabled() {
-        backend.window().set_ime_allowed(enabled);
-    }
+    // Sync the IME bridge's current state to winit. Computes
+    // desired (cursor_area, ime_allowed) from `active_fcitx_ic` +
+    // `tip_wants_ime` and diffs against what it last told winit —
+    // see `ImeBridge::sync_to_winit` for the ordering-matters
+    // reasoning.
+    state.ime.sync_to_winit(backend.window());
 
     if let Some(status) = state.cursor.take_changed() {
         let window = backend.window();
@@ -470,6 +473,50 @@ pub fn init_winit(
                 }
 
                 WinitEvent::Ime(event) => {
+                    tracing::info!("winit Ime event: {event:?}");
+
+                    // Relay to the DBus fcitx5 active IC first so
+                    // embedded clients (WeChat / Electron via
+                    // GTK_IM_MODULE=fcitx) receive inline preedit +
+                    // commit. Clone the active IC handle out so we
+                    // can take a mutable borrow of `state.dbus`
+                    // without conflicting with `state.ime`.
+                    if let Some((conn, ic_path)) =
+                        state.ime.active_dbus_ic().map(|(c, p)| (c, p.to_string()))
+                    {
+                        if let Some(broker) = state.dbus.broker.as_mut() {
+                            match &event {
+                                winit_crate::event::Ime::Commit(text) => {
+                                    if let Err(e) =
+                                        broker.emit_commit_string(conn, &ic_path, text)
+                                    {
+                                        tracing::warn!(error = %e, "dbus: emit CommitString failed");
+                                    }
+                                }
+                                winit_crate::event::Ime::Preedit(text, cursor) => {
+                                    // Pass full (begin, end) range — broker
+                                    // splits the text into chunks so the
+                                    // active segment renders with HighLight,
+                                    // matching native text_input_v3 clients.
+                                    let cursor_range =
+                                        cursor.map(|(b, e)| (b as i32, e as i32));
+                                    if let Err(e) = broker.emit_preedit(
+                                        conn,
+                                        &ic_path,
+                                        text,
+                                        cursor_range,
+                                    ) {
+                                        tracing::warn!(error = %e, "dbus: emit UpdateFormattedPreedit failed");
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Then forward to the text_input_v3 path (for
+                    // Wayland-native clients like Chromium with
+                    // `--enable-wayland-ime` that bypass DBus).
                     state
                         .ime
                         .on_host_ime_event(event, &state.seat, &state.apps, backend.window());

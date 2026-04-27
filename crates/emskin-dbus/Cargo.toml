@@ -1,0 +1,13 @@
+[package]
+name = "emskin-dbus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "DBus session-bus protocol primitives (SASL + v1 parser + per-connection state machine + IME cursor-coord rewrite) for nested Wayland compositors"
+
+[dependencies]
+tracing.workspace = true
+zvariant = { version = "5", default-features = false }
+serde = { workspace = true }

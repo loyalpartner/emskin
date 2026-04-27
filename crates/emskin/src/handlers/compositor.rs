@@ -104,7 +104,8 @@ impl CompositorHandler for EmskinState {
                     let target = crate::KeyboardFocusTarget::from(layer);
                     if keyboard.current_focus().as_ref() != Some(&target) {
                         // Save current focus so layer_destroyed can restore it.
-                        self.focus.layer_saved_focus = keyboard.current_focus();
+                        self.focus
+                            .enter(crate::state::FocusOverride::Layer, keyboard.current_focus());
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                         keyboard.set_focus(self, Some(target), serial);
                         tracing::debug!("layer surface received keyboard focus");

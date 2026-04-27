@@ -113,8 +113,8 @@ impl WlrLayerShellHandler for EmskinState {
                 use smithay::utils::IsAlive;
                 let restore = self
                     .focus
-                    .layer_saved_focus
-                    .take()
+                    .exit(crate::state::FocusOverride::Layer)
+                    .flatten()
                     .filter(|t| t.alive())
                     .or_else(|| self.emacs_focus_target());
                 let serial = SERIAL_COUNTER.next_serial();
