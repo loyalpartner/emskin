@@ -326,8 +326,8 @@ fn handle_dbus_accept(state: &mut EmskinState) {
 /// `(client, upstream)` pair. Each source pumps one direction; on EOF
 /// or I/O error, both sources are torn down and the broker's connection
 /// state is freed.
-fn register_dbus_connection(state: &mut EmskinState, accepted: emskin::dbus_broker::ConnAccepted) {
-    use emskin::dbus_broker::PumpOutcome;
+fn register_dbus_connection(state: &mut EmskinState, accepted: emskin_dbus::ConnAccepted) {
+    use emskin_dbus::PumpOutcome;
     use smithay::reexports::calloop::{generic::Generic, Interest, Mode, PostAction};
     use std::os::unix::io::FromRawFd;
 
@@ -432,7 +432,7 @@ enum DropSide {
     Upstream,
 }
 
-fn drop_dbus_connection(state: &mut EmskinState, id: emskin::dbus_broker::ConnId, side: DropSide) {
+fn drop_dbus_connection(state: &mut EmskinState, id: emskin_dbus::ConnId, side: DropSide) {
     if let Some((client_token, upstream_token)) = state.dbus.connection_tokens.remove(&id) {
         match side {
             DropSide::Client => state.loop_handle.remove(upstream_token),

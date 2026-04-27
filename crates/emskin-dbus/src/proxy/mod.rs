@@ -1,32 +1,34 @@
-//! In-process DBus broker — calloop-driven replacement for the
-//! `emskin-dbus-proxy` subprocess.
+//! In-process DBus broker — IO loop + listener + per-connection state
+//! that owns the unix sockets and drives the byte-stream state machine
+//! provided by [`crate::broker`] and the fcitx5 classifier provided by
+//! [`crate::fcitx`].
 //!
 //! # Responsibilities
 //!
 //! - Bind a Unix socket inside `$XDG_RUNTIME_DIR/emskin-dbus-<pid>/bus.sock`
 //!   that embedded apps dial via `DBUS_SESSION_BUS_ADDRESS`.
 //! - For each accepted client, dial the real upstream session bus.
-//! - Drive both halves of the pair via non-blocking reads + write buffers.
-//! - On the `client → bus` direction, apply the cursor-coord rewrite from
-//!   [`emskin_dbus::fcitx`] classifier + reply synthesizer.
-//!
-//! # What this is **not** (yet)
-//!
-//! This module is wired up in a follow-up commit. Right now it only
-//! provides the plumbing — the existing `DbusBridge::spawn_and_connect`
-//! subprocess path stays the source of truth until the switch-over.
+//! - Drive both halves of the pair via non-blocking `recvmsg` /
+//!   `sendmsg` (so `SCM_RIGHTS` ancillary fds round-trip — see
+//!   [`cmsg`]).
+//! - On the `client → bus` direction, intercept the fcitx5 frontend
+//!   methods via [`crate::fcitx`] classifier + reply synthesizer and
+//!   forward everything else verbatim.
+//! - On the `bus → client` direction, parse messages so we can attach
+//!   declared `unix_fds` to outbound packets, observe `GetNameOwner`
+//!   replies / `NameOwnerChanged` signals, and refresh the cached
+//!   fcitx5 unique name used as `sender` on synthesized signals.
 //!
 //! # Design choices
 //!
-//! - The broker struct owns fds and protocol state; the calloop glue lives
-//!   in `main.rs` (`register_dbus_sources` in commit 3) so the broker has
-//!   zero calloop dep. This keeps it unit-testable with plain
-//!   `socketpair()`.
-//! - `offset` is a plain `Option<(i32, i32)>` — no `Arc<Mutex>`, because
-//!   every callback runs on the event loop thread.
-//! - Writes use a `VecDeque<u8>` back-pressure buffer per direction,
-//!   mirroring [`crate::ipc::IpcServer`]'s pattern. If the peer isn't
-//!   readable, bytes sit in the buffer until it is.
+//! - The broker struct owns fds and protocol state; the calloop glue
+//!   lives in the consumer crate's `main.rs` (e.g. `emskin`'s
+//!   `register_dbus_sources`) so this module has zero calloop dep.
+//!   This keeps it unit-testable with plain `socketpair()`.
+//! - Writes use a `VecDeque<OutPacket>` back-pressure queue per
+//!   direction, mirroring the pattern in `emskin::ipc`'s server. Each
+//!   packet equals one DBus message (post-SASL) so its `unix_fds` ride
+//!   together with the first byte of the message header.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, ErrorKind};
@@ -34,8 +36,8 @@ use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use emskin_dbus::fcitx::{self, INPUT_CONTEXT_INTERFACE};
-use emskin_dbus::{
+use crate::fcitx::{self, INPUT_CONTEXT_INTERFACE};
+use crate::{
     ConnectionState, Fcitx5MethodCall, Frame, FrameBuilder, InputContextAllocator, MessageKind,
     SerialCounter,
 };
@@ -85,10 +87,15 @@ const SIGNAL_SENDER: &str = "org.fcitx.Fcitx5";
 pub struct ConnId(u64);
 
 impl ConnId {
-    /// Construct a `ConnId` for tests (ImeBridge unit tests need to
-    /// build owner identities without a live broker).
-    #[cfg(test)]
-    pub(crate) fn new_for_test(n: u64) -> Self {
+    /// Construct a `ConnId` from a raw value. Used by downstream crate
+    /// tests (e.g. `emskin`'s `ImeBridge` unit tests) to build owner
+    /// identities without a live broker. Production code should only
+    /// see `ConnId`s produced by [`DbusBroker::accept_one`].
+    ///
+    /// Not gated on `cfg(test)` because cargo test attributes don't
+    /// cross crate boundaries; consumers' tests compile against the
+    /// release-shaped public API.
+    pub fn new_for_test(n: u64) -> Self {
         Self(n)
     }
 }
@@ -1037,7 +1044,7 @@ mod tests {
         // Client should receive our synthesized method_return.
         let client_got = drain(&mut client);
         assert!(!client_got.is_empty(), "client should have a reply");
-        let reply = emskin_dbus::wire::frame::Frame::parse(&client_got).unwrap();
+        let reply = crate::wire::frame::Frame::parse(&client_got).unwrap();
         assert_eq!(reply.headers.reply_serial, Some(7));
         assert_eq!(reply.body.len(), 0); // empty body
 
@@ -1293,7 +1300,7 @@ mod tests {
         // Client: method_return with `oay` signature (two top-level
         // args — object path + byte array — not a struct).
         let client_got = drain(&mut client);
-        let reply = emskin_dbus::wire::frame::Frame::parse(&client_got).unwrap();
+        let reply = crate::wire::frame::Frame::parse(&client_got).unwrap();
         assert_eq!(reply.headers.reply_serial, Some(42));
         assert_eq!(reply.headers.signature.as_deref(), Some("oay"));
 

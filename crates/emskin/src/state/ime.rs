@@ -56,7 +56,7 @@ use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::text_input::{TextInputHandle, TextInputManagerState, TextInputSeat};
 
 use crate::apps::AppManager;
-use crate::dbus_broker::ConnId;
+use emskin_dbus::ConnId;
 use crate::EmskinState;
 
 /// Debounce window for `CursorRect` events following a DBus `FocusIn`.
@@ -475,12 +475,12 @@ impl ImeBridge {
     /// Process a fcitx event from the DBus broker.
     pub fn on_fcitx_event(
         &mut self,
-        event: crate::dbus_broker::FcitxEvent,
+        event: emskin_dbus::FcitxEvent,
         app_origin: Option<[i32; 2]>,
         seat: &Seat<EmskinState>,
         apps: &AppManager,
     ) {
-        use crate::dbus_broker::FcitxEvent;
+        use emskin_dbus::FcitxEvent;
 
         match event {
             FcitxEvent::FocusChanged {

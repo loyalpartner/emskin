@@ -1,17 +1,20 @@
-# emskin-dbus — DBus session-bus protocol primitives
+# emskin-dbus — DBus session-bus protocol primitives + in-process broker
 
 Zero smithay deps. Provides the SASL handshake scanner, DBus v1 frame
-parser + encoder, per-connection state machine, and fcitx5 frontend
-classifier / reply synthesis used by emskin's in-process broker.
+parser + encoder, per-connection byte-stream state machine, fcitx5
+frontend classifier / reply synthesis, **and** the full in-process
+broker IO loop (listener, upstream dialing, per-connection pumps with
+`SCM_RIGHTS` fd passing, fcitx5 signal emitters).
 
 History: started out as a subprocess (`emskin-dbus-proxy` binary) +
 JSON ctl socket for cursor-coord rewrite. M1 pulled the broker
-in-process. M2 replaced the cursor-rewrite hack with a full fcitx5
-DBus frontend intercept (B1 — see `emskin/src/dbus_broker.rs` header
-comment + this crate's `fcitx/` module). The lib still has no smithay
-dep but in practice is emskin-specific at this point; "reusable by any
-nested compositor" is retained as a *possibility* rather than a design
-constraint.
+in-process under `emskin/src/dbus_broker/`. M2 replaced the
+cursor-rewrite hack with a full fcitx5 DBus frontend intercept (B1).
+M3 added `SCM_RIGHTS` fd passing so portal.Secret / portal.FileChooser
+clients work (Feishu's `RetrieveSecret` was the canary). M4 moved the
+broker out of `emskin/` and into this crate's `proxy/` module, since
+it has no emskin / smithay deps — just the wire primitives in this
+same crate plus libc.
 
 ## Module layout
 
@@ -26,14 +29,18 @@ src/
 ├── broker/      # per-connection byte-stream state machine
 │   ├── mod.rs
 │   └── state.rs # ConnectionState, FeedOutcome, BrokerError
-└── fcitx.rs     # fcitx5 frontend: predicates + classify + IC allocator
-                  # + build_reply, all in one ~700-line module since the
-                  # surface is small and single-purpose.
+├── fcitx.rs     # fcitx5 frontend: predicates + classify + IC allocator
+│                # + build_reply, all in one ~700-line module since the
+│                # surface is small and single-purpose.
+└── proxy/       # in-process broker IO loop (listener, upstream dial,
+    ├── mod.rs   # per-connection pumps, fcitx5 intercept + signal emit)
+    ├── cmsg.rs  # recvmsg/sendmsg + SCM_RIGHTS fd passing
+    └── signals.rs # build_preedit_chunks (UpdateFormattedPreedit chunks)
 ```
 
 ## Scope matrix
 
-| Feature | Phase 1 | Phase 2 |
+| Feature | Done | Future |
 |---|---|---|
 | SASL handshake scanner (`wire/sasl.rs`) | ✅ | |
 | DBus v1 frame parser + encoder (`wire/frame.rs`) | ✅ | |
@@ -41,41 +48,37 @@ src/
 | Fcitx5 method_call classifier (`fcitx/classify.rs`) | ✅ | |
 | Per-connection fcitx5 IC registry (`fcitx/ic.rs`) | ✅ | |
 | Fcitx5 method_return synthesis (`fcitx/reply.rs`) | ✅ | |
+| In-process broker IO loop (`proxy/mod.rs`) | ✅ | |
+| `SCM_RIGHTS` fd passing (`proxy/cmsg.rs`) | ✅ | |
 | `RequestName` local-own interception → closes emskin#60 | | ✅ |
 | `ListNames` / `NameOwnerChanged` merging for policy | | ✅ |
 
 ## Architecture
 
 ```
-embedded app (WeChat / Emacs pgtk / Electron)
+embedded app (WeChat / Emacs pgtk / Electron / Feishu)
        │
        │ DBus (bus.sock injected via DBUS_SESSION_BUS_ADDRESS)
        ▼
-┌──────────────── emskin process ───────────────┐
-│                                               │
-│  dbus_broker.rs (calloop-driven)              │
-│    ├─ ConnectionState             ← this lib  │
-│    │   parses client → bus bytes              │
-│    │                                          │
-│    ├─ fcitx::classify             ← this lib  │
-│    │   matches InputMethod1 / InputContext1   │
-│    │                                          │
-│    ├─ fcitx::build_reply          ← this lib  │
-│    │   synthesizes method_return bytes        │
-│    │                                          │
-│    └─ FrameBuilder::signal        ← this lib  │
+┌──────────── emskin-dbus::proxy ─────────────┐
+│  DbusBroker (recvmsg/sendmsg + SCM_RIGHTS)  │
+│    ├─ ConnectionState (wire/sasl + frames)  │
+│    ├─ fcitx::classify (InputMethod1 /       │
+│    │                   InputContext1)       │
+│    ├─ fcitx::build_reply (method_return)    │
+│    └─ FrameBuilder::signal                  │
 │        (CommitString / UpdateFormattedPreedit)│
-│                                               │
-└──────┬────────────────────────────────────────┘
-       │ non-fcitx5 methods pass through
+└──────┬──────────────────────────────────────┘
+       │ non-fcitx5 methods pass through, fds round-trip
        ▼
   upstream host session bus (real fcitx5 stays untouched)
 ```
 
-The socket-level I/O (calloop sources, read / write buffers, accept
-loop, upstream dialing) lives in `emskin/src/dbus_broker.rs`. This
-crate is pure enough that every test runs without an event loop —
-socketpair-style end-to-end coverage is in the broker's tests.
+The consumer crate (e.g. `emskin`) wires the broker's listener fd and
+each accepted connection's two fds (`client`, `upstream`) into its
+event loop. From this crate's perspective those fds are just data —
+calloop / mio / tokio all work the same. Tests use plain
+`std::os::unix::net::socketpair` and step the pumps manually.
 
 ## Invariants
 
@@ -109,18 +112,20 @@ socketpair-style end-to-end coverage is in the broker's tests.
   text (no visual distinction from committed content). The active
   segment (from winit's `(begin, end)` cursor range) gets
   `Underline | HighLight` for the inverted-color "currently composing"
-  rendering — see `dbus_broker::build_preedit_chunks` in the consumer
-  crate.
+  rendering — see `proxy::signals::build_preedit_chunks`.
 - **`BareSignature`, not `Value::Signature`, encodes the SIGNATURE
   header.** zvariant 5 wraps multi-element signatures in `()` (it
   models them as an implicit struct); GDBus / fcitx5 reject signal
   bodies whose declared SIGNATURE includes those parens — IM signals
   silently drop. Regression test:
   `wire::frame::tests::signature_field_does_not_wrap_in_parens`.
-- **No fd passing yet.** DBus methods that transfer unix fds
-  (`SCM_RIGHTS` — portals, notification image payloads) forward
-  without the fds; those calls fail. Documented phase-1 limitation in
-  emskin#55.
+- **`SCM_RIGHTS` rides one packet at a time.** The proxy's IO uses
+  `recvmsg(MSG_CMSG_CLOEXEC)` / `sendmsg`; outbound queues are
+  `VecDeque<OutPacket>` where one packet = one DBus message
+  (post-SASL) and its declared `unix_fds` ride alongside that
+  packet's first byte. On partial write the fds are gone — they were
+  delivered with the first byte — so retry sends the remaining bytes
+  with no ancillary. Pre-SASL bytes go through as one fd-less packet.
 
 ## Non-goals
 

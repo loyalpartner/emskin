@@ -13,7 +13,7 @@ use std::process::Command;
 
 use smithay::reexports::calloop::RegistrationToken;
 
-use crate::dbus_broker::{parse_unix_bus_address, ConnId, DbusBroker};
+use emskin_dbus::{parse_unix_bus_address, ConnId, DbusBroker};
 
 /// The bridge is "live" iff `broker.is_some()`. Fields left `None` when
 /// inert; every caller checks before acting.
