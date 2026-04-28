@@ -41,13 +41,31 @@ impl CompositorHandler for EmskinState {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
+            let committed_window = self
                 .workspace
                 .active_space
                 .elements()
                 .find(|w| w.wl_surface().map(|s| *s == root).unwrap_or(false))
-            {
+                .cloned();
+            if let Some(ref window) = committed_window {
                 window.on_commit();
+            }
+            // Floating dialog: re-center on every commit until the
+            // client's natural size lands (`promote_floating_dialog`
+            // configures 0×0, the buffer that finally arrives sets the
+            // real size, and we want it visually centered). Idempotent
+            // — `re_center_dialog` is just `map_element` with a fresh
+            // location.
+            if let Some(window) = committed_window {
+                if window
+                    .user_data()
+                    .get::<crate::tick::FloatingDialogTag>()
+                    .is_some()
+                    && window.geometry().size.w > 0
+                    && window.geometry().size.h > 0
+                {
+                    crate::tick::re_center_dialog(self, &window);
+                }
             }
 
             // Pending → committed geometry transition for embedded app windows.

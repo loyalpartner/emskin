@@ -321,6 +321,7 @@ impl EmskinState {
                 active_name: String::new(),
                 next_id: 2,
                 pending_emacs_toplevels: Vec::new(),
+                pending_app_toplevels: Vec::new(),
                 protocol: workspace_protocol,
             },
 

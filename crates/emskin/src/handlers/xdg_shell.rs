@@ -13,8 +13,8 @@ use smithay::{
     wayland::{
         compositor::with_states,
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            XdgToplevelSurfaceData,
+            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
+            XdgShellState, XdgToplevelSurfaceData,
         },
     },
 };
@@ -97,41 +97,40 @@ impl XdgShellHandler for EmskinState {
                 .push((surface, window));
             tracing::info!("Emacs client toplevel detected — deferred for parent check");
         } else {
-            // Subsequent toplevels from other clients = embedded app windows.
-            let window_id = self.apps.alloc_id();
-            let title =
-                Self::get_toplevel_data(&surface, |d| d.lock().ok().and_then(|d| d.title.clone()))
-                    .unwrap_or_default();
-
-            tracing::info!(
-                "embedded app toplevel connected: window_id={window_id} title={title:?}"
-            );
-
-            // Start at 1×1; actual size arrives via set_geometry IPC.
-            surface.with_pending_state(|s| {
-                s.size = Some((1, 1).into());
-            });
-
-            let window = Window::new_wayland_window(surface);
-            // Map at 1×1 so on_commit() and initial configure work.
+            // Subsequent toplevels from other clients = embedded windows.
+            // Defer the dialog-vs-app classification by one tick: at this
+            // point set_parent / set_min_size / set_max_size from the same
+            // Wayland batch may not have been processed yet (mirror of the
+            // Emacs child-frame defer above). `process_pending_toplevels`
+            // re-reads them and routes to either FloatingDialog or
+            // AppManager.
+            //
+            // Crucially, we do NOT pin a size here. A previous version
+            // configured (1, 1) so the initial round-trip would
+            // immediately tell the client "you're tiny" — but
+            // xwayland-satellite faithfully forwards that configure to
+            // the X client and clobbers its natural size. By the time
+            // `promote_floating_dialog` later sends configure(0, 0)
+            // ("client choose"), the client's idea of natural size has
+            // already been wiped out, leaving the dialog at 1×1 / not
+            // rendering. Leaving pending size unset means the initial
+            // configure goes out as (0, 0), which is the "client
+            // choose" semantic in xdg_shell — clients commit at their
+            // natural size and we re-configure once classified.
+            let window = Window::new_wayland_window(surface.clone());
+            // Tag so handle_surface_commit knows to *defer* the initial
+            // configure: until `process_pending_app_toplevels` classifies
+            // this toplevel, we don't know whether to send (0, 0) for a
+            // dialog or (1, 1) for an embedded app, and sending a
+            // half-baked configure now causes some X11 clients (Feishu
+            // via xwayland-satellite) to give up and exit.
+            window
+                .user_data()
+                .insert_if_missing(crate::tick::PendingClassificationTag::default);
             self.workspace
                 .active_space
                 .map_element(window.clone(), (0, 0), false);
-            self.apps.insert(crate::apps::AppWindow {
-                window_id,
-                window: window.clone(),
-                workspace_id: self.workspace.active_id,
-                geometry: None,
-                pending_geometry: None,
-                pending_since: None,
-                visible: false,
-                mirrors: std::collections::HashMap::new(),
-            });
-
-            self.ipc
-                .send(crate::ipc::OutgoingMessage::WindowCreated { window_id, title });
-
-            self.auto_focus_new_window(window, window_id);
+            self.workspace.pending_app_toplevels.push((surface, window));
         }
     }
 
@@ -157,8 +156,63 @@ impl XdgShellHandler for EmskinState {
         surface.send_repositioned(token);
     }
 
-    fn move_request(&mut self, _surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // Emacs is always fullscreen in emskin — ignore move requests
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        // Only floating dialogs are draggable. Emacs is fullscreen
+        // and embedded apps are positioned by the Emacs IPC layer —
+        // letting either be moved would desync the layout.
+        let Some(window) = self
+            .workspace
+            .active_space
+            .elements()
+            .find(|w| {
+                w.toplevel()
+                    .is_some_and(|t| t.wl_surface() == surface.wl_surface())
+            })
+            .cloned()
+        else {
+            return;
+        };
+        if window
+            .user_data()
+            .get::<crate::tick::FloatingDialogTag>()
+            .is_none()
+        {
+            return;
+        }
+
+        let Some(seat) = Seat::<EmskinState>::from_resource(&seat) else {
+            return;
+        };
+        let Some(pointer) = seat.get_pointer() else {
+            return;
+        };
+        // The client must own the click that started this move.
+        if !pointer.has_grab(serial) {
+            return;
+        }
+        let Some(start_data) = pointer.grab_start_data() else {
+            return;
+        };
+        // Click must have landed on a surface from the same client.
+        use smithay::reexports::wayland_server::Resource;
+        let same_client = start_data
+            .focus
+            .as_ref()
+            .is_some_and(|(s, _)| s.id().same_client_as(&surface.wl_surface().id()));
+        if !same_client {
+            return;
+        }
+        let Some(initial_window_location) = self.workspace.active_space.element_location(&window)
+        else {
+            return;
+        };
+
+        let grab = crate::grabs::MoveDialogGrab {
+            start_data,
+            window,
+            initial_window_location,
+        };
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     fn resize_request(
@@ -305,6 +359,51 @@ impl XdgShellHandler for EmskinState {
     }
 }
 
+/// Whether a toplevel should map as a floating dialog (centered, no
+/// AppManager / no Emacs buffer) instead of an embedded app window.
+///
+/// Direct port of sway's `wants_floating` (sway/desktop/xdg_shell.c:228):
+///
+/// ```c
+/// return (min_w != 0 && min_h != 0 &&
+///         (min_w == max_w || min_h == max_h))
+///        || toplevel->parent;
+/// ```
+///
+/// Note the OR between `min_w == max_w` and `min_h == max_h` — a single
+/// pinned axis is enough. We previously required both axes pinned plus
+/// a 600×500 hard size cap, but the cap kept misclassifying wechat's
+/// 560×760 login window (HiDPI doubles the X-side `WM_NORMAL_HINTS`
+/// satellite forwards) as an embedded app.
+///
+/// X11 clients arrive through `xwayland-satellite`, which forwards
+/// `WM_NORMAL_HINTS` → `xdg_toplevel.set_min_size` + `set_max_size`
+/// (xwayland-satellite/src/server/mod.rs:978) and `WM_TRANSIENT_FOR` →
+/// `set_parent`. Both `parent` and the cached min/max sizes are
+/// populated only after the client's initial dispatch burst finishes —
+/// call this from the drain pass in
+/// `tick::process_pending_app_toplevels`, never inside
+/// `XdgShellHandler::new_toplevel`.
+pub fn wants_floating(_state: &EmskinState, surface: &ToplevelSurface) -> bool {
+    let parent = with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|d| d.lock().ok())
+            .and_then(|d| d.parent.clone())
+    });
+    if parent.is_some() {
+        return true;
+    }
+
+    let (min, max) = with_states(surface.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let current = cached.current();
+        (current.min_size, current.max_size)
+    });
+    min.w > 0 && min.h > 0 && (min.w == max.w || min.h == max.h)
+}
+
 /// Extract a short display name from an Emacs frame title for the workspace bar.
 /// Strips " - GNU Emacs ..." suffix and "*eaf: " prefix.
 /// e.g. "*eaf: firefox* - GNU Emacs at home" → "firefox*"
@@ -367,7 +466,14 @@ pub fn handle_surface_commit(
                 .unwrap_or(true)
         });
 
-        if !initial_configure_sent {
+        // Skip auto-configure while the toplevel is still awaiting
+        // dialog-vs-app classification — see PendingClassificationTag.
+        let pending_classification = window
+            .user_data()
+            .get::<crate::tick::PendingClassificationTag>()
+            .is_some();
+
+        if !initial_configure_sent && !pending_classification {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_configure();
             }

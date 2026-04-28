@@ -473,7 +473,7 @@ pub fn init_winit(
                 }
 
                 WinitEvent::Ime(event) => {
-                    tracing::info!("winit Ime event: {event:?}");
+                    tracing::debug!("winit Ime event: {event:?}");
 
                     // Relay to the DBus fcitx5 active IC first so
                     // embedded clients (WeChat / Electron via

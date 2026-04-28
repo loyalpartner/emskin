@@ -38,6 +38,13 @@ pub struct WorkspaceState {
     pub next_id: u64,
     /// Emacs toplevels awaiting parent() check (child frame detection).
     pub pending_emacs_toplevels: Vec<(ToplevelSurface, Window)>,
+    /// Embedded-app toplevels awaiting dialog-vs-app classification.
+    /// Same one-tick-defer pattern as `pending_emacs_toplevels`: the
+    /// dispatch_clients pass that fires `new_toplevel` may not yet have
+    /// processed the client's `set_parent` / `set_min_size` /
+    /// `set_max_size` requests (cf. sway/desktop/xdg_shell.c:228
+    /// `wants_floating`). Drained in `tick::process_pending_toplevels`.
+    pub pending_app_toplevels: Vec<(ToplevelSurface, Window)>,
     /// ext-workspace-v1 protocol state.
     pub protocol: crate::protocols::workspace::WorkspaceProtocolState,
 }

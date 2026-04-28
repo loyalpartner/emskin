@@ -1,6 +1,6 @@
 pub mod capture;
 pub mod clipboard_bridge;
-pub mod dbus_broker;
+pub mod grabs;
 pub mod handlers;
 pub mod input;
 pub mod ipc;

@@ -5,4 +5,4 @@ mod output;
 mod pointer_constraints;
 mod seat;
 mod selection;
-mod xdg_shell;
+pub(crate) mod xdg_shell;

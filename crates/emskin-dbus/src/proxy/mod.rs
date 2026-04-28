@@ -1,47 +1,80 @@
-//! In-process DBus broker — calloop-driven replacement for the
-//! `emskin-dbus-proxy` subprocess.
+//! In-process DBus broker — IO loop + listener + per-connection state
+//! that owns the unix sockets and drives the byte-stream state machine
+//! provided by [`crate::broker`] and the fcitx5 classifier provided by
+//! [`crate::fcitx`].
 //!
 //! # Responsibilities
 //!
 //! - Bind a Unix socket inside `$XDG_RUNTIME_DIR/emskin-dbus-<pid>/bus.sock`
 //!   that embedded apps dial via `DBUS_SESSION_BUS_ADDRESS`.
 //! - For each accepted client, dial the real upstream session bus.
-//! - Drive both halves of the pair via non-blocking reads + write buffers.
-//! - On the `client → bus` direction, apply the cursor-coord rewrite from
-//!   [`emskin_dbus::fcitx`] classifier + reply synthesizer.
-//!
-//! # What this is **not** (yet)
-//!
-//! This module is wired up in a follow-up commit. Right now it only
-//! provides the plumbing — the existing `DbusBridge::spawn_and_connect`
-//! subprocess path stays the source of truth until the switch-over.
+//! - Drive both halves of the pair via non-blocking `recvmsg` /
+//!   `sendmsg` (so `SCM_RIGHTS` ancillary fds round-trip — see
+//!   [`cmsg`]).
+//! - On the `client → bus` direction, intercept the fcitx5 frontend
+//!   methods via [`crate::fcitx`] classifier + reply synthesizer and
+//!   forward everything else verbatim.
+//! - On the `bus → client` direction, parse messages so we can attach
+//!   declared `unix_fds` to outbound packets, observe `GetNameOwner`
+//!   replies / `NameOwnerChanged` signals, and refresh the cached
+//!   fcitx5 unique name used as `sender` on synthesized signals.
 //!
 //! # Design choices
 //!
-//! - The broker struct owns fds and protocol state; the calloop glue lives
-//!   in `main.rs` (`register_dbus_sources` in commit 3) so the broker has
-//!   zero calloop dep. This keeps it unit-testable with plain
-//!   `socketpair()`.
-//! - `offset` is a plain `Option<(i32, i32)>` — no `Arc<Mutex>`, because
-//!   every callback runs on the event loop thread.
-//! - Writes use a `VecDeque<u8>` back-pressure buffer per direction,
-//!   mirroring [`crate::ipc::IpcServer`]'s pattern. If the peer isn't
-//!   readable, bytes sit in the buffer until it is.
+//! - The broker struct owns fds and protocol state; the calloop glue
+//!   lives in the consumer crate's `main.rs` (e.g. `emskin`'s
+//!   `register_dbus_sources`) so this module has zero calloop dep.
+//!   This keeps it unit-testable with plain `socketpair()`.
+//! - Writes use a `VecDeque<OutPacket>` back-pressure queue per
+//!   direction, mirroring the pattern in `emskin::ipc`'s server. Each
+//!   packet equals one DBus message (post-SASL) so its `unix_fds` ride
+//!   together with the first byte of the message header.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::io::{self, ErrorKind};
+use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
-use emskin_dbus::fcitx::{self, INPUT_CONTEXT_INTERFACE};
-use emskin_dbus::{
+use crate::fcitx::{self, INPUT_CONTEXT_INTERFACE};
+use crate::{
     ConnectionState, Fcitx5MethodCall, Frame, FrameBuilder, InputContextAllocator, MessageKind,
     SerialCounter,
 };
 
+mod cmsg;
 mod signals;
+use cmsg::{recvmsg_with_fds, sendmsg_with_fds};
 use signals::{build_preedit_chunks, HIGHLIGHT, UNDERLINE};
+
+/// One outbound chunk in a write queue. The fds — if any — ride on
+/// the *first* `sendmsg` for this packet via `SCM_RIGHTS`. Once that
+/// `sendmsg` succeeds (full or partial), the fds are dropped and any
+/// remaining bytes are sent without ancillary data.
+///
+/// Packet boundaries equal DBus message boundaries on the post-SASL
+/// path: every parsed `Frame` becomes one `OutPacket`, so the number
+/// of fds attached always matches that frame's `unix_fds` header
+/// declaration. Pre-SASL bytes go through as one `OutPacket` with no
+/// fds (DBus spec disallows fd passing during AUTH).
+#[derive(Debug)]
+struct OutPacket {
+    bytes: Vec<u8>,
+    fds: Vec<OwnedFd>,
+}
+
+impl OutPacket {
+    fn bytes_only(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            fds: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && self.fds.is_empty()
+    }
+}
 
 /// Sender name we stamp on synthesized signals. GDBus (and most other
 /// DBus libraries) filter incoming signals against the `sender=`
@@ -57,10 +90,15 @@ const SIGNAL_SENDER: &str = "org.fcitx.Fcitx5";
 pub struct ConnId(u64);
 
 impl ConnId {
-    /// Construct a `ConnId` for tests (ImeBridge unit tests need to
-    /// build owner identities without a live broker).
-    #[cfg(test)]
-    pub(crate) fn new_for_test(n: u64) -> Self {
+    /// Construct a `ConnId` from a raw value. Used by downstream crate
+    /// tests (e.g. `emskin`'s `ImeBridge` unit tests) to build owner
+    /// identities without a live broker. Production code should only
+    /// see `ConnId`s produced by [`DbusBroker::accept_one`].
+    ///
+    /// Not gated on `cfg(test)` because cargo test attributes don't
+    /// cross crate boundaries; consumers' tests compile against the
+    /// release-shaped public API.
+    pub fn new_for_test(n: u64) -> Self {
         Self(n)
     }
 }
@@ -122,12 +160,22 @@ struct Connection {
     client: UnixStream,
     upstream: UnixStream,
     state: ConnectionState,
-    /// Bytes waiting to be written to `client` (came from upstream
+    /// Packets waiting to be written to `client` (came from upstream
     /// or synthesized by us intercepting fcitx5 methods).
-    client_out: VecDeque<u8>,
-    /// Bytes waiting to be written to `upstream` (came from client,
+    client_out: VecDeque<OutPacket>,
+    /// Packets waiting to be written to `upstream` (came from client,
     /// minus any fcitx5 method_calls we intercepted).
-    upstream_out: VecDeque<u8>,
+    upstream_out: VecDeque<OutPacket>,
+    /// Fds extracted from `recvmsg(client)` ancillary data, queued in
+    /// arrival order. Drained per outbound message according to its
+    /// `unix_fds` header declaration when we forward it to upstream.
+    /// Fds belonging to intercepted fcitx5 calls are dropped here
+    /// (they close on `OwnedFd::Drop`).
+    client_in_fds: VecDeque<OwnedFd>,
+    /// Symmetric to `client_in_fds` — fds extracted from
+    /// `recvmsg(upstream)` awaiting matching with the next outbound
+    /// message to the client.
+    upstream_in_fds: VecDeque<OwnedFd>,
     /// Allocator for synthetic IC paths handed back in
     /// `CreateInputContext` replies. Holds no per-IC state — see
     /// `emskin_dbus::fcitx::ic` for the rationale.
@@ -251,6 +299,8 @@ impl DbusBroker {
                 state: ConnectionState::new(),
                 client_out: VecDeque::new(),
                 upstream_out: VecDeque::new(),
+                client_in_fds: VecDeque::new(),
+                upstream_in_fds: VecDeque::new(),
                 ic_allocator: InputContextAllocator::new(),
                 serial_counter: SerialCounter::new(),
                 fcitx_server_name: None,
@@ -293,13 +343,19 @@ impl DbusBroker {
         };
 
         let mut buf = [0u8; 8 * 1024];
-        let n = match conn.client.read(&mut buf) {
-            Ok(0) => return Ok(PumpOutcome::PeerClosed),
-            Ok(n) => n,
+        let (n, fds) = match recvmsg_with_fds(conn.client.as_raw_fd(), &mut buf) {
+            Ok((0, _)) => return Ok(PumpOutcome::PeerClosed),
+            Ok(t) => t,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(PumpOutcome::Active),
             Err(e) if e.kind() == ErrorKind::Interrupted => return Ok(PumpOutcome::Active),
             Err(e) => return Err(e),
         };
+        // Queue any fds the client passed via SCM_RIGHTS; they'll be
+        // matched to outbound messages by `unix_fds` count below.
+        if !fds.is_empty() {
+            tracing::trace!(?id, count = fds.len(), "client recvmsg: extracted fds");
+            conn.client_in_fds.extend(fds);
+        }
 
         let out = conn
             .state
@@ -307,26 +363,44 @@ impl DbusBroker {
             .map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
 
         // Fast path: no messages (handshake bytes only). Forward
-        // verbatim — nothing to inspect or intercept.
+        // verbatim — nothing to inspect or intercept. fds shouldn't
+        // appear during AUTH per spec; if any did arrive, send them
+        // along piggybacked on the handshake bytes.
         if out.frame_ranges.is_empty() {
-            conn.upstream_out.extend(out.outbound);
+            let mut pkt = OutPacket::bytes_only(out.outbound);
+            pkt.fds = conn.client_in_fds.drain(..).collect();
+            conn.upstream_out.push_back(pkt);
             Self::try_flush(&mut conn.upstream, &mut conn.upstream_out)?;
             return Ok(PumpOutcome::Active);
         }
 
-        // Slow path: walk every message, decide its disposition. Any
-        // bytes before the first parsed message (auth tail, if the
-        // BEGIN landed in this same chunk) are prepended verbatim.
-        let mut forwarded = Vec::with_capacity(out.outbound.len());
-        forwarded.extend_from_slice(&out.outbound[..out.frame_ranges[0].start]);
+        // Slow path: walk every message, decide its disposition.
+
+        // Auth tail (bytes before the first parsed message) — forward
+        // verbatim with no fds.
+        if out.frame_ranges[0].start > 0 {
+            conn.upstream_out.push_back(OutPacket::bytes_only(
+                out.outbound[..out.frame_ranges[0].start].to_vec(),
+            ));
+        }
 
         for msg in &out.frame_ranges {
-            let msg_bytes = &out.outbound[msg.start..msg.end];
-            let frame = match Frame::parse(msg_bytes) {
+            let msg_bytes = out.outbound[msg.start..msg.end].to_vec();
+            let frame = match Frame::parse(&msg_bytes) {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!(?id, error = %e, "failed to parse client → bus frame; forwarding verbatim");
-                    forwarded.extend_from_slice(msg_bytes);
+                    conn.upstream_out
+                        .push_back(OutPacket::bytes_only(msg_bytes));
+                    // Without a parsed header we don't know this frame's
+                    // declared `unix_fds`, so any queued in-fds can't be
+                    // matched to subsequent messages without misaligning
+                    // them. Mirror the bytes_needed-error path: drop them.
+                    if !conn.client_in_fds.is_empty() {
+                        let dropped = conn.client_in_fds.len();
+                        conn.client_in_fds.clear();
+                        tracing::warn!(?id, dropped, "dropped queued client in-fds after parse failure to preserve alignment");
+                    }
                     continue;
                 }
             };
@@ -336,8 +410,29 @@ impl DbusBroker {
                 signature = frame.headers.signature.as_deref().unwrap_or(""),
                 destination = frame.headers.destination.as_deref().unwrap_or(""),
                 body_len = frame.body.len(),
+                unix_fds = frame.headers.unix_fds.unwrap_or(0),
                 "client → bus message"
             );
+
+            // Pop the fds this message claims to carry. Done before
+            // we decide intercept-vs-forward so that the in-queue
+            // stays aligned with subsequent messages either way.
+            let fd_count = frame.headers.unix_fds.unwrap_or(0) as usize;
+            let mut msg_fds = Vec::with_capacity(fd_count);
+            for _ in 0..fd_count {
+                match conn.client_in_fds.pop_front() {
+                    Some(f) => msg_fds.push(f),
+                    None => {
+                        tracing::warn!(
+                            ?id,
+                            declared = fd_count,
+                            collected = msg_fds.len(),
+                            "client → bus message declared unix_fds but in queue is short"
+                        );
+                        break;
+                    }
+                }
+            }
 
             // Track outgoing `org.freedesktop.DBus.GetNameOwner(s)`
             // requests that ask about a fcitx5 well-known name. When
@@ -381,21 +476,26 @@ impl DbusBroker {
                     &mut conn.ic_allocator,
                     &mut conn.serial_counter,
                 );
-                conn.client_out.extend(reply);
+                conn.client_out.push_back(OutPacket::bytes_only(reply));
                 Self::emit_fcitx_event(events, id, &fm);
                 tracing::debug!(
                     ?id,
                     member = frame.headers.member.as_deref().unwrap_or(""),
+                    intercepted_fds = msg_fds.len(),
                     "intercepted fcitx5 method_call; reply queued"
                 );
+                // msg_fds drop here — fcitx5 calls don't carry fds in
+                // practice, but if a malformed one did, we close them.
                 continue;
             }
 
-            // Not fcitx5 — forward verbatim.
-            forwarded.extend_from_slice(msg_bytes);
+            // Not fcitx5 — forward verbatim, with the fds it claimed.
+            conn.upstream_out.push_back(OutPacket {
+                bytes: msg_bytes,
+                fds: msg_fds,
+            });
         }
 
-        conn.upstream_out.extend(forwarded);
         Self::try_flush(&mut conn.upstream, &mut conn.upstream_out)?;
         // Also flush client_out now — our intercepted replies shouldn't
         // wait for the peer's next wakeup to reach the client.
@@ -511,7 +611,8 @@ impl DbusBroker {
             .body(&text.to_string())
             .build();
         tracing::trace!(?conn, ic_path, text, sender, "emit CommitString signal");
-        c.client_out.extend(frame.encode());
+        c.client_out
+            .push_back(OutPacket::bytes_only(frame.encode()));
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
 
@@ -562,7 +663,8 @@ impl DbusBroker {
             cursor_offset,
             "emit UpdateFormattedPreedit signal"
         );
-        c.client_out.extend(frame.encode());
+        c.client_out
+            .push_back(OutPacket::bytes_only(frame.encode()));
         Self::try_flush(&mut c.client, &mut c.client_out)
     }
 
@@ -579,25 +681,35 @@ impl DbusBroker {
             return Ok(PumpOutcome::PeerClosed);
         };
         let mut buf = [0u8; 8 * 1024];
-        let n = match conn.upstream.read(&mut buf) {
-            Ok(0) => return Ok(PumpOutcome::PeerClosed),
-            Ok(n) => n,
+        let (n, fds) = match recvmsg_with_fds(conn.upstream.as_raw_fd(), &mut buf) {
+            Ok((0, _)) => return Ok(PumpOutcome::PeerClosed),
+            Ok(t) => t,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(PumpOutcome::Active),
             Err(e) if e.kind() == ErrorKind::Interrupted => return Ok(PumpOutcome::Active),
             Err(e) => return Err(e),
         };
-        // Forward verbatim first — preserve existing behavior.
-        conn.client_out.extend(&buf[..n]);
-        Self::try_flush(&mut conn.client, &mut conn.client_out)?;
+        if !fds.is_empty() {
+            tracing::trace!(?id, count = fds.len(), "upstream recvmsg: extracted fds");
+            conn.upstream_in_fds.extend(fds);
+        }
 
-        // Observe post-SASL bytes. `state.is_authenticated()` only flips once
-        // the client's `BEGIN\r\n` has crossed the wire, which happens
-        // AFTER upstream has finished its `OK <guid>\r\n` handshake —
-        // so once authed, every byte arriving from upstream is a DBus
-        // v1 message frame.
+        // Pre-auth: forward verbatim, no message parsing. SASL phase
+        // doesn't allow fd passing per spec, but if any did sneak in
+        // we still deliver them along with the bytes (kernel's
+        // problem if it crosses).
         if !conn.state.is_authenticated() {
+            let mut pkt = OutPacket::bytes_only(buf[..n].to_vec());
+            pkt.fds = conn.upstream_in_fds.drain(..).collect();
+            conn.client_out.push_back(pkt);
+            Self::try_flush(&mut conn.client, &mut conn.client_out)?;
             return Ok(PumpOutcome::Active);
         }
+
+        // Post-auth: every byte arriving from upstream is a DBus v1
+        // message frame. We parse so we can both (a) attach the
+        // declared `unix_fds` count from the in-queue, and (b) observe
+        // GetNameOwner replies / NameOwnerChanged signals for the
+        // sender-name cache.
         conn.upstream_buf.extend_from_slice(&buf[..n]);
         loop {
             let total = match Frame::bytes_needed(&conn.upstream_buf) {
@@ -605,49 +717,86 @@ impl DbusBroker {
                 Ok(Some(n)) => n,
                 Err(e) => {
                     tracing::warn!(?id, error = %e, "upstream parser: giving up on this conn");
-                    conn.upstream_buf.clear();
+                    // Drain rather than `clear()` so the bytes still
+                    // reach the client — the parser desync is our
+                    // problem, not the client's.
+                    let leftover: Vec<u8> = conn.upstream_buf.drain(..).collect();
+                    if !leftover.is_empty() {
+                        conn.client_out.push_back(OutPacket::bytes_only(leftover));
+                    }
+                    // Any in-flight fds we couldn't match are now
+                    // un-matchable; close them.
+                    conn.upstream_in_fds.clear();
                     break;
                 }
             };
             if conn.upstream_buf.len() < total {
                 break;
             }
-            let bytes = conn.upstream_buf.drain(..total).collect::<Vec<u8>>();
+            let bytes: Vec<u8> = conn.upstream_buf.drain(..total).collect();
             let frame = match Frame::parse(&bytes) {
                 Ok(f) => f,
                 Err(e) => {
-                    tracing::warn!(?id, error = %e, "upstream parser: bad frame");
+                    tracing::warn!(?id, error = %e, "upstream parser: bad frame; forwarding without fds");
+                    conn.client_out.push_back(OutPacket::bytes_only(bytes));
+                    // Without a parsed header we don't know this frame's
+                    // declared `unix_fds`, so any queued in-fds can't be
+                    // matched to subsequent messages without misaligning
+                    // them. Mirror the bytes_needed-error path: drop them.
+                    if !conn.upstream_in_fds.is_empty() {
+                        let dropped = conn.upstream_in_fds.len();
+                        conn.upstream_in_fds.clear();
+                        tracing::warn!(?id, dropped, "dropped queued upstream in-fds after parse failure to preserve alignment");
+                    }
                     continue;
                 }
             };
+
+            // Pop the fds this frame claims to carry, before any
+            // observation logic, so the in-queue stays aligned.
+            let fd_count = frame.headers.unix_fds.unwrap_or(0) as usize;
+            let mut msg_fds = Vec::with_capacity(fd_count);
+            for _ in 0..fd_count {
+                match conn.upstream_in_fds.pop_front() {
+                    Some(f) => msg_fds.push(f),
+                    None => {
+                        tracing::warn!(
+                            ?id,
+                            declared = fd_count,
+                            collected = msg_fds.len(),
+                            "upstream message declared unix_fds but in queue is short"
+                        );
+                        break;
+                    }
+                }
+            }
+
             match frame.kind {
                 // Reply to an outgoing GetNameOwner we tracked: parse
                 // the single-string body to learn the unique-name
                 // owner. Authoritative source — overwrites any earlier
                 // guess from the destination-capture path.
                 MessageKind::MethodReturn => {
-                    let Some(reply_serial) = frame.headers.reply_serial else {
-                        continue;
-                    };
-                    let Some(looked_up) = conn.pending_name_lookups.remove(&reply_serial) else {
-                        continue;
-                    };
-                    let Some(owner) = frame.decode_body::<String>() else {
-                        tracing::warn!(
-                            ?id,
-                            reply_serial,
-                            looked_up,
-                            "GetNameOwner reply body not a string; skipping"
-                        );
-                        continue;
-                    };
-                    tracing::trace!(
-                        ?id,
-                        name = looked_up,
-                        owner,
-                        "resolved fcitx5 unique owner via GetNameOwner reply"
-                    );
-                    conn.fcitx_server_name = Some(owner);
+                    if let Some(reply_serial) = frame.headers.reply_serial {
+                        if let Some(looked_up) = conn.pending_name_lookups.remove(&reply_serial) {
+                            if let Some(owner) = frame.decode_body::<String>() {
+                                tracing::trace!(
+                                    ?id,
+                                    name = looked_up,
+                                    owner,
+                                    "resolved fcitx5 unique owner via GetNameOwner reply"
+                                );
+                                conn.fcitx_server_name = Some(owner);
+                            } else {
+                                tracing::warn!(
+                                    ?id,
+                                    reply_serial,
+                                    looked_up,
+                                    "GetNameOwner reply body not a string; skipping"
+                                );
+                            }
+                        }
+                    }
                 }
                 // `org.freedesktop.DBus.NameOwnerChanged(sss)` signal
                 // — fired by the daemon when a well-known name's
@@ -655,33 +804,37 @@ impl DbusBroker {
                 // We refresh / invalidate our cache so signals emitted
                 // after the change carry the correct sender.
                 MessageKind::Signal if is_name_owner_changed_signal(&frame) => {
-                    let Some((name, _old, new)) = frame.decode_body::<(String, String, String)>()
-                    else {
-                        continue;
-                    };
-                    if !fcitx::is_fcitx_well_known(&name) {
-                        continue;
-                    }
-                    if new.is_empty() {
-                        tracing::trace!(
-                            ?id,
-                            name,
-                            "fcitx5 owner went away (NameOwnerChanged, new_owner empty)"
-                        );
-                        conn.fcitx_server_name = None;
-                    } else {
-                        tracing::trace!(
-                            ?id,
-                            name,
-                            new_owner = new,
-                            "fcitx5 owner changed (NameOwnerChanged)"
-                        );
-                        conn.fcitx_server_name = Some(new);
+                    if let Some((name, _old, new)) = frame.decode_body::<(String, String, String)>()
+                    {
+                        if fcitx::is_fcitx_well_known(&name) {
+                            if new.is_empty() {
+                                tracing::trace!(
+                                    ?id,
+                                    name,
+                                    "fcitx5 owner went away (NameOwnerChanged, new_owner empty)"
+                                );
+                                conn.fcitx_server_name = None;
+                            } else {
+                                tracing::trace!(
+                                    ?id,
+                                    name,
+                                    new_owner = new,
+                                    "fcitx5 owner changed (NameOwnerChanged)"
+                                );
+                                conn.fcitx_server_name = Some(new);
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
+
+            conn.client_out.push_back(OutPacket {
+                bytes,
+                fds: msg_fds,
+            });
         }
+        Self::try_flush(&mut conn.client, &mut conn.client_out)?;
         Ok(PumpOutcome::Active)
     }
 
@@ -713,21 +866,64 @@ impl DbusBroker {
         }
     }
 
-    /// Write as many bytes from `buf` to `stream` as the kernel will
-    /// take without blocking. Leftover stays in `buf`. Matches the
-    /// pattern in [`crate::ipc::connection::IpcConn::try_flush`].
-    fn try_flush(stream: &mut UnixStream, buf: &mut VecDeque<u8>) -> io::Result<()> {
-        while !buf.is_empty() {
-            let (front, back) = buf.as_slices();
-            let slice = if !front.is_empty() { front } else { back };
-            match stream.write(slice) {
-                Ok(0) => return Ok(()),
-                Ok(n) => {
-                    buf.drain(..n);
+    /// Write as many `OutPacket`s from `queue` to `stream` as the
+    /// kernel will take without blocking. Each packet's fds — if any
+    /// — ride on the *first* `sendmsg` for that packet via
+    /// `SCM_RIGHTS`; on partial writes the fds are consumed (kernel
+    /// already delivered them with the first byte) and the remaining
+    /// bytes go out fd-less on subsequent calls.
+    ///
+    /// Matches the back-pressure pattern in
+    /// [`crate::ipc::connection::IpcConn::try_flush`].
+    fn try_flush(stream: &mut UnixStream, queue: &mut VecDeque<OutPacket>) -> io::Result<()> {
+        while let Some(front) = queue.front_mut() {
+            if front.is_empty() {
+                queue.pop_front();
+                continue;
+            }
+            // Take the fds out before sendmsg; if it succeeds we're
+            // done with them either way (kernel delivered them with
+            // the first byte). If it fails with WouldBlock we restore
+            // them so the next call retries with fds attached.
+            let fds_taken: Vec<OwnedFd> = std::mem::take(&mut front.fds);
+            let raw_fds: Vec<RawFd> = fds_taken.iter().map(|f| f.as_raw_fd()).collect();
+
+            let res = sendmsg_with_fds(stream.as_raw_fd(), &front.bytes, &raw_fds);
+            match res {
+                Ok(0) => {
+                    // Empty buffer should have been popped above; if
+                    // we get here treat as kernel back-pressure.
+                    front.fds = fds_taken;
+                    return Ok(());
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Ok(n) => {
+                    // fds were delivered with the first byte — now
+                    // owned by the receiver, drop our copies.
+                    drop(fds_taken);
+                    front.bytes.drain(..n);
+                    if front.bytes.is_empty() {
+                        queue.pop_front();
+                    }
+                    // Continue draining: the next packet may also be
+                    // ready to go in this call.
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    // Restore fds so the retry sends them. Important:
+                    // we must NOT have called sendmsg successfully —
+                    // if WouldBlock came from sendmsg itself (no
+                    // bytes delivered) the fds also weren't delivered.
+                    front.fds = fds_taken;
+                    return Ok(());
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    front.fds = fds_taken;
+                    continue;
+                }
+                Err(e) => {
+                    // On hard error, drop fds (they'd leak otherwise).
+                    drop(fds_taken);
+                    return Err(e);
+                }
             }
         }
         Ok(())
@@ -776,7 +972,7 @@ pub fn parse_unix_bus_address(addr: &str) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -869,7 +1065,7 @@ mod tests {
         // Client should receive our synthesized method_return.
         let client_got = drain(&mut client);
         assert!(!client_got.is_empty(), "client should have a reply");
-        let reply = emskin_dbus::wire::frame::Frame::parse(&client_got).unwrap();
+        let reply = crate::wire::frame::Frame::parse(&client_got).unwrap();
         assert_eq!(reply.headers.reply_serial, Some(7));
         assert_eq!(reply.body.len(), 0); // empty body
 
@@ -1125,7 +1321,7 @@ mod tests {
         // Client: method_return with `oay` signature (two top-level
         // args — object path + byte array — not a struct).
         let client_got = drain(&mut client);
-        let reply = emskin_dbus::wire::frame::Frame::parse(&client_got).unwrap();
+        let reply = crate::wire::frame::Frame::parse(&client_got).unwrap();
         assert_eq!(reply.headers.reply_serial, Some(42));
         assert_eq!(reply.headers.signature.as_deref(), Some("oay"));
 
