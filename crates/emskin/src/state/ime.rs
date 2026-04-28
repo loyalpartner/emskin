@@ -56,8 +56,8 @@ use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::text_input::{TextInputHandle, TextInputManagerState, TextInputSeat};
 
 use crate::apps::AppManager;
-use emskin_dbus::ConnId;
 use crate::EmskinState;
+use emskin_dbus::ConnId;
 
 /// Debounce window for `CursorRect` events following a DBus `FocusIn`.
 /// pgtk Emacs's GTK IM module fires a burst of `SetCursorRectV2`

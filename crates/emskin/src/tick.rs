@@ -265,17 +265,17 @@ fn process_pending_app_toplevels(state: &mut EmskinState) {
         // Log the full set of inputs the heuristic actually sees, so a
         // misclassified login window (wechat / feishu / file pickers)
         // is debuggable from the journal without rebuilding emskin.
-        let (title, app_id, min, max) = inspect_toplevel_for_log(&surface);
+        let log = inspect_toplevel_for_log(&surface);
         tracing::info!(
             target: "emskin::dialog",
             floating,
             has_parent = surface.parent().is_some(),
-            ?title,
-            ?app_id,
-            min_w = min.w,
-            min_h = min.h,
-            max_w = max.w,
-            max_h = max.h,
+            title = ?log.title,
+            app_id = ?log.app_id,
+            min_w = log.min.w,
+            min_h = log.min.h,
+            max_w = log.max.w,
+            max_h = log.max.h,
             "embedded toplevel classification",
         );
         if floating {
@@ -286,16 +286,19 @@ fn process_pending_app_toplevels(state: &mut EmskinState) {
     }
 }
 
+/// Inputs to `wants_floating`, captured for diagnostic logging.
+struct ToplevelLogInputs {
+    title: Option<String>,
+    app_id: Option<String>,
+    min: smithay::utils::Size<i32, smithay::utils::Logical>,
+    max: smithay::utils::Size<i32, smithay::utils::Logical>,
+}
+
 /// Read the inputs that `wants_floating` consults, for diagnostic
 /// logging. Pure side-effect-free read of the toplevel's cached state.
 fn inspect_toplevel_for_log(
     surface: &smithay::wayland::shell::xdg::ToplevelSurface,
-) -> (
-    Option<String>,
-    Option<String>,
-    smithay::utils::Size<i32, smithay::utils::Logical>,
-    smithay::utils::Size<i32, smithay::utils::Logical>,
-) {
+) -> ToplevelLogInputs {
     use smithay::wayland::compositor::with_states;
     use smithay::wayland::shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData};
 
@@ -312,7 +315,12 @@ fn inspect_toplevel_for_log(
         let current = cached.current();
         (current.min_size, current.max_size)
     });
-    (title, app_id, min, max)
+    ToplevelLogInputs {
+        title,
+        app_id,
+        min,
+        max,
+    }
 }
 
 /// Marker stored in a floating dialog's `Window::user_data`. The
@@ -379,10 +387,7 @@ fn promote_floating_dialog(
 
     // Grant keyboard focus unless a prefix chord is in flight.
     let prefix_active = state.focus.is_active(crate::state::FocusOverride::Prefix);
-    tracing::info!(
-        prefix_active,
-        "floating dialog: granting keyboard focus"
-    );
+    tracing::info!(prefix_active, "floating dialog: granting keyboard focus");
     if !prefix_active {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         if let Some(keyboard) = state.seat.get_keyboard() {

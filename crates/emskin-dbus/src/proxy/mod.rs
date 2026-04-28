@@ -65,7 +65,10 @@ struct OutPacket {
 
 impl OutPacket {
     fn bytes_only(bytes: Vec<u8>) -> Self {
-        Self { bytes, fds: Vec::new() }
+        Self {
+            bytes,
+            fds: Vec::new(),
+        }
     }
 
     fn is_empty(&self) -> bool {
@@ -387,7 +390,17 @@ impl DbusBroker {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!(?id, error = %e, "failed to parse client → bus frame; forwarding verbatim");
-                    conn.upstream_out.push_back(OutPacket::bytes_only(msg_bytes));
+                    conn.upstream_out
+                        .push_back(OutPacket::bytes_only(msg_bytes));
+                    // Without a parsed header we don't know this frame's
+                    // declared `unix_fds`, so any queued in-fds can't be
+                    // matched to subsequent messages without misaligning
+                    // them. Mirror the bytes_needed-error path: drop them.
+                    if !conn.client_in_fds.is_empty() {
+                        let dropped = conn.client_in_fds.len();
+                        conn.client_in_fds.clear();
+                        tracing::warn!(?id, dropped, "dropped queued client in-fds after parse failure to preserve alignment");
+                    }
                     continue;
                 }
             };
@@ -726,6 +739,15 @@ impl DbusBroker {
                 Err(e) => {
                     tracing::warn!(?id, error = %e, "upstream parser: bad frame; forwarding without fds");
                     conn.client_out.push_back(OutPacket::bytes_only(bytes));
+                    // Without a parsed header we don't know this frame's
+                    // declared `unix_fds`, so any queued in-fds can't be
+                    // matched to subsequent messages without misaligning
+                    // them. Mirror the bytes_needed-error path: drop them.
+                    if !conn.upstream_in_fds.is_empty() {
+                        let dropped = conn.upstream_in_fds.len();
+                        conn.upstream_in_fds.clear();
+                        tracing::warn!(?id, dropped, "dropped queued upstream in-fds after parse failure to preserve alignment");
+                    }
                     continue;
                 }
             };
@@ -782,8 +804,7 @@ impl DbusBroker {
                 // We refresh / invalidate our cache so signals emitted
                 // after the change carry the correct sender.
                 MessageKind::Signal if is_name_owner_changed_signal(&frame) => {
-                    if let Some((name, _old, new)) =
-                        frame.decode_body::<(String, String, String)>()
+                    if let Some((name, _old, new)) = frame.decode_body::<(String, String, String)>()
                     {
                         if fcitx::is_fcitx_well_known(&name) {
                             if new.is_empty() {

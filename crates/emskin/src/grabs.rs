@@ -78,11 +78,7 @@ impl PointerGrab<EmskinState> for MoveDialogGrab {
         handle.axis(data, details);
     }
 
-    fn frame(
-        &mut self,
-        data: &mut EmskinState,
-        handle: &mut PointerInnerHandle<'_, EmskinState>,
-    ) {
+    fn frame(&mut self, data: &mut EmskinState, handle: &mut PointerInnerHandle<'_, EmskinState>) {
         handle.frame(data);
     }
 

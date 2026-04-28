@@ -164,7 +164,10 @@ impl XdgShellHandler for EmskinState {
             .workspace
             .active_space
             .elements()
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface.wl_surface()))
+            .find(|w| {
+                w.toplevel()
+                    .is_some_and(|t| t.wl_surface() == surface.wl_surface())
+            })
             .cloned()
         else {
             return;
@@ -199,8 +202,7 @@ impl XdgShellHandler for EmskinState {
         if !same_client {
             return;
         }
-        let Some(initial_window_location) =
-            self.workspace.active_space.element_location(&window)
+        let Some(initial_window_location) = self.workspace.active_space.element_location(&window)
         else {
             return;
         };

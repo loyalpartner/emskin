@@ -27,7 +27,9 @@ pub mod wire;
 // drilling through `emskin_dbus::wire::frame::Frame`.
 pub use broker::state::{BrokerError, ConnectionState, FeedOutcome};
 pub use fcitx::{build_reply, classify, Fcitx5MethodCall, InputContextAllocator};
-pub use proxy::{parse_unix_bus_address, ConnAccepted, ConnId, DbusBroker, FcitxEvent, PumpOutcome};
+pub use proxy::{
+    parse_unix_bus_address, ConnAccepted, ConnId, DbusBroker, FcitxEvent, PumpOutcome,
+};
 pub use wire::frame::{
     BodyBuilder, FieldCode, Frame, FrameBuilder, FrameError, Headers, MessageKind, SerialCounter,
 };

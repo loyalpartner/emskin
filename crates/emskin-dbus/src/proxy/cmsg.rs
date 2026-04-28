@@ -73,8 +73,8 @@ pub fn recvmsg_with_fds(fd: RawFd, buf: &mut [u8]) -> io::Result<(usize, Vec<Own
         let chdr = unsafe { *cmsg };
         if chdr.cmsg_level == libc::SOL_SOCKET && chdr.cmsg_type == libc::SCM_RIGHTS {
             let data_ptr = unsafe { libc::CMSG_DATA(cmsg) } as *const RawFd;
-            let payload_len = (chdr.cmsg_len as usize)
-                .saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
+            let payload_len =
+                (chdr.cmsg_len as usize).saturating_sub(unsafe { libc::CMSG_LEN(0) } as usize);
             let count = payload_len / size_of::<RawFd>();
             for i in 0..count {
                 // SAFETY: `data_ptr.add(i)` stays within the cmsg
@@ -110,7 +110,7 @@ pub fn sendmsg_with_fds(fd: RawFd, buf: &[u8], fds: &[RawFd]) -> io::Result<usiz
         iov_base: buf.as_ptr() as *mut _,
         iov_len: buf.len(),
     };
-    let cmsg_payload_len = fds.len() * size_of::<RawFd>();
+    let cmsg_payload_len = std::mem::size_of_val(fds);
     let cmsg_space = if fds.is_empty() {
         0
     } else {
@@ -134,7 +134,7 @@ pub fn sendmsg_with_fds(fd: RawFd, buf: &[u8], fds: &[RawFd]) -> io::Result<usiz
             (*cmsg).cmsg_len = libc::CMSG_LEN(cmsg_payload_len as _) as _;
             std::ptr::copy_nonoverlapping(
                 fds.as_ptr() as *const u8,
-                libc::CMSG_DATA(cmsg) as *mut u8,
+                libc::CMSG_DATA(cmsg),
                 cmsg_payload_len,
             );
         }
@@ -230,7 +230,13 @@ mod tests {
         assert_eq!(fds.len(), 3);
         // Each received fd should be a distinct, kernel-allocated number.
         let received: Vec<_> = fds.iter().map(|f| f.as_raw_fd()).collect();
-        assert_eq!(received.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(
+            received
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
     }
 
     /// EOF on peer close — `recvmsg` returns 0 bytes, no fds.
@@ -251,11 +257,6 @@ mod tests {
         let mut fds = [0 as RawFd; 2];
         let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
         assert_eq!(r, 0);
-        unsafe {
-            (
-                OwnedFd::from_raw_fd(fds[0]),
-                OwnedFd::from_raw_fd(fds[1]),
-            )
-        }
+        unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
     }
 }
