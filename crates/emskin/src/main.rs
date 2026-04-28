@@ -88,6 +88,16 @@ struct Cli {
     /// found on `$PATH`.
     #[arg(long, default_value = "xwayland-satellite")]
     xwayland_satellite_bin: std::path::PathBuf,
+
+    /// Spawn a private `dbus-daemon` for embedded apps and route the
+    /// broker's upstream to it instead of the host session bus.
+    /// Side effects: `.service` activations (portal, GApplication
+    /// single-instance) happen inside emskin's environment, so windows
+    /// stop leaking out to the host compositor. Notifications, tray,
+    /// secret service, and any other host-only services become
+    /// unreachable from inside emskin in this mode. Experimental.
+    #[arg(long)]
+    dbus_isolated: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -182,7 +192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // missing or unparseable upstream bus downgrades the bridge to an
     // inert state — embedded IME popups then land wherever they always
     // did (no regression vs. pre-broker behavior).
-    state.dbus = state::dbus::DbusBridge::init();
+    state.dbus = if cli.dbus_isolated {
+        state::dbus::DbusBridge::init_isolated()
+    } else {
+        state::dbus::DbusBridge::init()
+    };
     if state.dbus.broker.is_some() {
         register_dbus_listen_source(&event_loop, &state)?;
     }
