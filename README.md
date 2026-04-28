@@ -76,10 +76,18 @@ yay -S emskin-bin
 # Dependencies (Arch Linux)
 sudo pacman -S wayland libxkbcommon mesa
 
-# Optional: embed X11 applications via xwayland-satellite (AUR).
-# Without it emskin runs Wayland-only — X clients can't be embedded
-# but everything else (pgtk Emacs, Wayland apps, clipboard, IME) works.
+# Optional: embed X11 applications via xwayland-satellite.
+# Without it, X clients (gtk3 Emacs, xterm, …) can't be embedded
+# inside emskin — they fall back to the host X server if one is
+# running, otherwise to TUI. Everything else (pgtk Emacs, Wayland
+# apps, clipboard, IME) works regardless.
+#
+# On Arch:
 yay -S xwayland-satellite
+
+# On distros that don't package it yet (UOS, older Debian, RHEL …),
+# build from upstream — Rust toolchain only:
+cargo install --git https://github.com/Supreeeme/xwayland-satellite.git
 
 # Option 1: cargo install
 cargo install --git https://github.com/emskin/emskin.git

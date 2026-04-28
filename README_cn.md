@@ -74,10 +74,17 @@ yay -S emskin-bin
 # 安装依赖（Arch Linux）
 sudo pacman -S wayland libxkbcommon mesa
 
-# 可选：通过 xwayland-satellite（AUR）嵌入 X11 应用。
-# 不装也能跑，emskin 变成纯 Wayland 模式——pgtk Emacs、Wayland 应用、
-# 剪切板、IME 全部正常，仅 X 客户端无法嵌入。
+# 可选：通过 xwayland-satellite 嵌入 X11 应用。
+# 不装也能跑——pgtk Emacs、Wayland 应用、剪切板、IME 全部正常；
+# X 客户端（gtk3 Emacs、xterm 等）无法嵌入，会 fallback 到宿主
+# X server（窗口画在 emskin 外面）或 TUI 模式。
+#
+# Arch：
 yay -S xwayland-satellite
+
+# 没打包这个的发行版（UOS、老 Debian、RHEL 等），用 Rust 工具链
+# 直接从上游编：
+cargo install --git https://github.com/Supreeeme/xwayland-satellite.git
 
 # 方式一：cargo install
 cargo install --git https://github.com/emskin/emskin.git
